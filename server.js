@@ -195,15 +195,34 @@ app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        t.*,
+        t.id,
+        t.tempo_secondi,
+        t.penalita_secondi,
+        p.id as id_pilota,
         p.nome,
         p.cognome,
         p.numero_gara
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
-      ORDER BY t.tempo_minuti ASC, t.tempo_secondi ASC, t.tempo_centesimi ASC
+      ORDER BY t.tempo_secondi ASC
     `);
-    res.json(result.rows);
+    
+    // Converti tempo_secondi in minuti, secondi, centesimi per il frontend
+    const tempiFormatted = result.rows.map(tempo => {
+      const tempoTotale = parseFloat(tempo.tempo_secondi) || 0;
+      const minuti = Math.floor(tempoTotale / 60);
+      const secondi = Math.floor(tempoTotale % 60);
+      const centesimi = Math.round((tempoTotale % 1) * 100);
+      
+      return {
+        ...tempo,
+        tempo_minuti: minuti,
+        tempo_secondi: secondi,
+        tempo_centesimi: centesimi
+      };
+    });
+    
+    res.json(tempiFormatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -214,11 +233,14 @@ app.post('/api/tempi', async (req, res) => {
   try {
     const { id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita } = req.body;
     
+    // Calcola tempo_secondi totale
+    const tempoTotaleSecondi = (tempo_minuti * 60) + tempo_secondi + (tempo_centesimi / 100);
+    
     const result = await pool.query(
-      `INSERT INTO tempi (id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita || 0]
+      [id_pilota, id_ps, tempoTotaleSecondi, penalita || 0]
     );
     
     res.status(201).json(result.rows[0]);
@@ -264,7 +286,7 @@ app.get('/api/classifiche', async (req, res) => {
         p.nome,
         p.cognome,
         p.numero_gara,
-        SUM(t.tempo_minuti * 60 + t.tempo_secondi + t.tempo_centesimi / 100) as tempo_totale
+        SUM(t.tempo_secondi) as tempo_totale
       FROM piloti p
       LEFT JOIN tempi t ON p.id = t.id_pilota
       GROUP BY p.id, p.nome, p.cognome, p.numero_gara
