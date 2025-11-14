@@ -198,8 +198,7 @@ app.get('/api/tempi', async (req, res) => {
         t.*,
         p.nome,
         p.cognome,
-        p.numero_gara,
-        p.categoria
+        p.numero_gara
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
       ORDER BY t.tempo_minuti ASC, t.tempo_secondi ASC, t.tempo_centesimi ASC
@@ -265,11 +264,10 @@ app.get('/api/classifiche', async (req, res) => {
         p.nome,
         p.cognome,
         p.numero_gara,
-        p.categoria,
         SUM(t.tempo_minuti * 60 + t.tempo_secondi + t.tempo_centesimi / 100) as tempo_totale
       FROM piloti p
       LEFT JOIN tempi t ON p.id = t.id_pilota
-      GROUP BY p.id, p.nome, p.cognome, p.numero_gara, p.categoria
+      GROUP BY p.id, p.nome, p.cognome, p.numero_gara
       ORDER BY tempo_totale ASC NULLS LAST
     `);
     res.json(result.rows);
