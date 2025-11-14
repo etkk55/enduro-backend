@@ -1,10 +1,13 @@
-require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
 const { Pool } = require('pg');
+const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
 
 // Database connection
 const pool = new Pool({
@@ -12,26 +15,36 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
-});
-
-// Test database
-app.get('/api/test-db', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ success: true, time: result.rows[0].now });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+// Test database connection
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Error connecting to database:', err.stack);
+  } else {
+    console.log('Successfully connected to database');
+    release();
   }
 });
 
-// Get all events
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Server is running' });
+});
+
+// Test database endpoint
+app.get('/api/test-db', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ success: true, time: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// EVENTI ENDPOINTS
+// ============================================
+
+// Get all eventi
 app.get('/api/eventi', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
@@ -41,82 +54,16 @@ app.get('/api/eventi', async (req, res) => {
   }
 });
 
-// Get pilots
-app.get('/api/piloti', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT p.*, c.nome_categoria 
-      FROM piloti p 
-      LEFT JOIN categorie c ON p.id_categoria = c.id 
-      ORDER BY p.numero_gara
-    `);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get classifications
-app.get('/api/classifiche', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT * FROM classifiche_per_categoria 
-      ORDER BY nome_categoria, posizione
-    `);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Seed database with test data
-app.get('/api/seed', async (req, res) => {
-  try {
-    // Insert event
-    await pool.query(`
-      INSERT INTO eventi (id, nome_evento, codice_gara, data_inizio, data_fine, luogo, stato) 
-      VALUES ('550e8400-e29b-41d4-a716-446655440000', 'Six Days Enduro Bergamo 2025', 'END2025BG', '2025-06-15', '2025-06-21', 'Bergamo, Italia', 'attivo')
-      ON CONFLICT (id) DO NOTHING
-    `);
-
-    // Insert categories
-    await pool.query(`
-      INSERT INTO categorie (id, id_evento, nome_categoria) VALUES
-      ('650e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 'Senior'),
-      ('650e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 'Under 23'),
-      ('650e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 'Women')
-      ON CONFLICT DO NOTHING
-    `);
-
-    // Insert pilots
-    await pool.query(`
-      INSERT INTO piloti (id, id_evento, numero_gara, nome, cognome, id_categoria, team, nazione) VALUES
-      ('750e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440000', 1, 'Marco', 'Rossi', '650e8400-e29b-41d4-a716-446655440001', 'KTM Factory', 'ITA'),
-      ('750e8400-e29b-41d4-a716-446655440002', '550e8400-e29b-41d4-a716-446655440000', 2, 'Andrea', 'Verdi', '650e8400-e29b-41d4-a716-446655440001', 'Husqvarna', 'ITA'),
-      ('750e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440000', 3, 'Luca', 'Bianchi', '650e8400-e29b-41d4-a716-446655440001', 'Beta Factory', 'ITA')
-      ON CONFLICT DO NOTHING
-    `);
-
-    res.json({ success: true, message: 'Database seeded!' });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-// Start server
-// ========================================
-// CREATE ENDPOINTS (POST)
-// ========================================
-
-// Create new event
+// Create evento
 app.post('/api/eventi', async (req, res) => {
   try {
-    const { nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione } = req.body;
+    const { nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione, stato) 
-       VALUES ($1, $2, $3, $4, $5, $6, 'bozza') 
+      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id, stato)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'attivo')
        RETURNING *`,
-      [nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione]
+      [nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id]
     );
     
     res.status(201).json(result.rows[0]);
@@ -125,16 +72,28 @@ app.post('/api/eventi', async (req, res) => {
   }
 });
 
-// Create new category
+// ============================================
+// CATEGORIE ENDPOINTS
+// ============================================
+
+// Get all categorie
+app.get('/api/categorie', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create categoria
 app.post('/api/categorie', async (req, res) => {
   try {
-    const { id_evento, nome_categoria, descrizione } = req.body;
+    const { nome_categoria, descrizione, id_evento } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO categorie (id_evento, nome_categoria, descrizione) 
-       VALUES ($1, $2, $3) 
-       RETURNING *`,
-      [id_evento, nome_categoria, descrizione]
+      'INSERT INTO categorie (nome_categoria, descrizione, id_evento) VALUES ($1, $2, $3) RETURNING *',
+      [nome_categoria, descrizione, id_evento]
     );
     
     res.status(201).json(result.rows[0]);
@@ -143,16 +102,30 @@ app.post('/api/categorie', async (req, res) => {
   }
 });
 
-// Register new pilot
+// ============================================
+// PILOTI ENDPOINTS
+// ============================================
+
+// Get all piloti
+app.get('/api/piloti', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM piloti ORDER BY numero_gara');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create pilota
 app.post('/api/piloti', async (req, res) => {
   try {
-    const { id_evento, numero_gara, nome, cognome, id_categoria, team, nazione } = req.body;
+    const { nome, cognome, numero_gara, categoria, email, telefono, id_evento } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO piloti (id_evento, numero_gara, nome, cognome, id_categoria, team, nazione) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) 
+      `INSERT INTO piloti (nome, cognome, numero_gara, categoria, email, telefono, id_evento)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [id_evento, numero_gara, nome, cognome, id_categoria, team, nazione]
+      [nome, cognome, numero_gara, categoria, email, telefono, id_evento]
     );
     
     res.status(201).json(result.rows[0]);
@@ -161,16 +134,50 @@ app.post('/api/piloti', async (req, res) => {
   }
 });
 
-// Create special stage (PS)
+// Delete pilota
+app.delete('/api/piloti/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'DELETE FROM piloti WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pilota non trovato' });
+    }
+    
+    res.json({ message: 'Pilota eliminato', pilota: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// PROVE SPECIALI ENDPOINTS
+// ============================================
+
+// Get all prove speciali
+app.get('/api/prove-speciali', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM prove_speciali ORDER BY numero_ordine');
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create prova speciale
 app.post('/api/prove-speciali', async (req, res) => {
   try {
-    const { id_evento, nome_ps, numero_ordine, lunghezza_km } = req.body;
+    const { nome_ps, numero_ordine, distanza_km, id_evento } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO prove_speciali (id_evento, nome_ps, numero_ordine, lunghezza_km, stato) 
-       VALUES ($1, $2, $3, $4, 'non_iniziata') 
+      `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento)
+       VALUES ($1, $2, $3)
        RETURNING *`,
-      [id_evento, nome_ps, numero_ordine, lunghezza_km]
+      [nome_ps, numero_ordine, id_evento]
     );
     
     res.status(201).json(result.rows[0]);
@@ -179,16 +186,45 @@ app.post('/api/prove-speciali', async (req, res) => {
   }
 });
 
-// Insert time
+// ============================================
+// TEMPI ENDPOINTS
+// ============================================
+
+// Get all tempi with pilot data (for classifiche)
+app.get('/api/tempi', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        t.id,
+        t.tempo_minuti,
+        t.tempo_secondi,
+        t.tempo_centesimi,
+        t.penalita,
+        p.id as id_pilota,
+        p.nome,
+        p.cognome,
+        p.numero_gara,
+        p.categoria
+      FROM tempi t
+      JOIN piloti p ON t.id_pilota = p.id
+      ORDER BY (t.tempo_minuti * 60 + t.tempo_secondi + t.tempo_centesimi / 100) ASC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create tempo
 app.post('/api/tempi', async (req, res) => {
   try {
-    const { id_ps, id_pilota, tempo_secondi, penalita_secondi } = req.body;
+    const { id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO tempi (id_ps, id_pilota, tempo_secondi, penalita_secondi) 
-       VALUES ($1, $2, $3, $4) 
+      `INSERT INTO tempi (id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [id_ps, id_pilota, tempo_secondi, penalita_secondi || 0]
+      [id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita || 0]
     );
     
     res.status(201).json(result.rows[0]);
@@ -197,11 +233,7 @@ app.post('/api/tempi', async (req, res) => {
   }
 });
 
-// ========================================
-// UPDATE ENDPOINTS (PUT)
-// ========================================
-
-// Update time
+// Update tempo
 app.put('/api/tempi/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -209,8 +241,8 @@ app.put('/api/tempi/:id', async (req, res) => {
     
     const result = await pool.query(
       `UPDATE tempi 
-       SET tempo_secondi = $1, penalita_secondi = $2, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $3 
+       SET tempo_secondi = $1, penalita_secondi = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
        RETURNING *`,
       [tempo_secondi, penalita_secondi, id]
     );
@@ -225,28 +257,33 @@ app.put('/api/tempi/:id', async (req, res) => {
   }
 });
 
-// ========================================
-// DELETE ENDPOINTS
-// ========================================
+// ============================================
+// CLASSIFICHE ENDPOINTS
+// ============================================
 
-// Delete pilot
-app.delete('/api/piloti/:id', async (req, res) => {
+// Get classifiche
+app.get('/api/classifiche', async (req, res) => {
   try {
-    const { id } = req.params;
-    
-    const result = await pool.query(
-      `DELETE FROM piloti WHERE id = $1 RETURNING *`,
-      [id]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Pilota non trovato' });
-    }
-    
-    res.json({ message: 'Pilota eliminato', pilota: result.rows[0] });
+    const result = await pool.query(`
+      SELECT 
+        p.id,
+        p.nome,
+        p.cognome,
+        p.numero_gara,
+        p.categoria,
+        SUM(t.tempo_minuti * 60 + t.tempo_secondi + t.tempo_centesimi / 100) as tempo_totale
+      FROM piloti p
+      LEFT JOIN tempi t ON p.id = t.id_pilota
+      GROUP BY p.id, p.nome, p.cognome, p.numero_gara, p.categoria
+      ORDER BY tempo_totale ASC NULLS LAST
+    `);
+    res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-});app.listen(PORT, '0.0.0.0', () => {
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
