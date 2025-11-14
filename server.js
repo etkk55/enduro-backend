@@ -70,7 +70,7 @@ app.get('/api/classifiche', async (req, res) => {
 });
 
 // Seed database with test data
-app.post('/api/seed', async (req, res) => {
+app.get('/api/seed', async (req, res) => {
   try {
     // Insert event
     await pool.query(`
