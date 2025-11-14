@@ -195,19 +195,14 @@ app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        t.id,
-        t.tempo_minuti,
-        t.tempo_secondi,
-        t.tempo_centesimi,
-        t.penalita,
-        p.id as id_pilota,
+        t.*,
         p.nome,
         p.cognome,
         p.numero_gara,
         p.categoria
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
-      ORDER BY (t.tempo_minuti * 60 + t.tempo_secondi + t.tempo_centesimi / 100) ASC
+      ORDER BY t.tempo_minuti ASC, t.tempo_secondi ASC, t.tempo_centesimi ASC
     `);
     res.json(result.rows);
   } catch (error) {
