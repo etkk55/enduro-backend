@@ -2,7 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 const axios = require('axios');
-const pdf = require('pdf-parse');
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -73,55 +73,87 @@ app.post('/api/import-ficr', async (req, res) => {
     
     const eventoData = descrizioneResponse.data.data[0];
     
-    // Scarica il PDF dalla FICR
-    const pdfUrl = url.replace('https://enduro.ficr.it/#/END/pdf/', 'https://dati.ficr.it/utilities/RAL/');
+    // Costruisci l'URL del PDF
+    // Dal browser: https://enduro.ficr.it/#/END/pdf/Campionato%20Regionale%20Enduro/2025/107/303/1
+    // URL reale PDF: https://dati.ficr.it/utilities/RAL/Campionato Regionale Enduro/2025/107/303/1
+    const pdfPath = url.split('/END/pdf/')[1];
+    const pdfUrl = `https://dati.ficr.it/utilities/RAL/${pdfPath}`;
+    
+    console.log(`Downloading PDF from: ${pdfUrl}`);
+    
+    // Scarica il PDF
     const pdfResponse = await axios.get(pdfUrl, { 
       responseType: 'arraybuffer',
       timeout: 30000
     });
     
-    // Parse PDF
-    const pdfData = await pdf(pdfResponse.data);
-    const text = pdfData.text;
+    console.log(`PDF downloaded, size: ${pdfResponse.data.byteLength} bytes`);
+    
+    // Parse PDF con pdfjs
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(pdfResponse.data)
+    });
+    const pdfDocument = await loadingTask.promise;
+    
+    console.log(`PDF has ${pdfDocument.numPages} pages`);
+    
+    let text = '';
+    for (let i = 1; i <= pdfDocument.numPages; i++) {
+      const page = await pdfDocument.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map(item => item.str).join(' ');
+      text += pageText + '\n';
+    }
+    
+    console.log(`Extracted text length: ${text.length} characters`);
     
     // Estrai piloti dal testo del PDF
     // Pattern: numero nome cognome anno PAR CO1 CO2 ARR
-    const pilotiRegex = /(\d+)\s+(\d+)\s+([A-Z]+)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+\(([A-Z]{2})\)\s+(\d{4})\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)/g;
+    // Esempio: "101 PELLIZZARO Davide (PD) 1999 9.00 11.45 14.30 15.00"
+    const pilotiRegex = /(\d+)\s+([A-Z]+)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+\(([A-Z]{2})\)\s+(\d{4})\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)/g;
     
     const piloti = [];
     let match;
     
     while ((match = pilotiRegex.exec(text)) !== null) {
       piloti.push({
-        numero_progressivo: parseInt(match[1]),
-        numero_gara: parseInt(match[2]),
-        cognome: match[3],
-        nome: match[4],
-        provincia: match[5],
-        anno_nascita: parseInt(match[6]),
-        par: match[7],
-        co1: match[8],
-        co2: match[9],
-        arr: match[10]
+        numero_gara: parseInt(match[1]),
+        cognome: match[2],
+        nome: match[3],
+        provincia: match[4],
+        anno_nascita: parseInt(match[5]),
+        par: match[6],
+        co1: match[7],
+        co2: match[8],
+        arr: match[9]
       });
     }
     
     console.log(`Found ${piloti.length} piloti in PDF`);
     
+    if (piloti.length === 0) {
+      console.log('Sample text from PDF:', text.substring(0, 500));
+      return res.status(400).json({ 
+        error: 'No pilots found in PDF. Check PDF format.',
+        sample_text: text.substring(0, 500)
+      });
+    }
+    
     // Importa nel database
     let importedCount = 0;
+    const errors = [];
     
     for (const pilota of piloti) {
       try {
         await pool.query(
           `INSERT INTO piloti (nome, cognome, numero_gara, categoria, id_evento, email, telefono)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT DO NOTHING`,
+           ON CONFLICT (numero_gara, id_evento) DO NOTHING`,
           [
             pilota.nome,
             pilota.cognome,
             pilota.numero_gara,
-            null, // categoria da determinare
+            null,
             id_evento,
             null,
             null
@@ -129,7 +161,10 @@ app.post('/api/import-ficr', async (req, res) => {
         );
         importedCount++;
       } catch (error) {
-        console.error(`Error importing pilota ${pilota.numero_gara}:`, error.message);
+        errors.push({
+          pilota: `${pilota.numero_gara} ${pilota.nome} ${pilota.cognome}`,
+          error: error.message
+        });
       }
     }
     
@@ -142,12 +177,16 @@ app.post('/api/import-ficr', async (req, res) => {
         data: eventoData.ma_Data
       },
       piloti_trovati: piloti.length,
-      piloti_importati: importedCount
+      piloti_importati: importedCount,
+      errors: errors.length > 0 ? errors : undefined
     });
     
   } catch (error) {
     console.error('Import error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
