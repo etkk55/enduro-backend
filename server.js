@@ -1,8 +1,6 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
-const axios = require('axios');
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -43,158 +41,9 @@ app.get('/api/test-db', async (req, res) => {
 });
 
 // ============================================
-// IMPORT FICR ENDPOINT
-// ============================================
-
-app.post('/api/import-ficr', async (req, res) => {
-  try {
-    const { url, id_evento } = req.body;
-    
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-    
-    // Estrai parametri dall'URL
-    // URL format: https://enduro.ficr.it/#/END/pdf/Campionato%20Regionale%20Enduro/2025/107/303/1
-    const urlParts = url.split('/');
-    const anno = urlParts[urlParts.length - 3];
-    const codiceEquipe = urlParts[urlParts.length - 2];
-    const manifestazione = urlParts[urlParts.length - 1];
-    
-    console.log(`Importing data for: ${anno}/${codiceEquipe}/${manifestazione}`);
-    
-    // Chiama API FICR per descrizione evento
-    const descrizioneUrl = `https://apienduro.ficr.it/END/mpcache-30/get/descrizione/${anno}/${codiceEquipe}/${manifestazione}`;
-    const descrizioneResponse = await axios.get(descrizioneUrl);
-    
-    if (descrizioneResponse.data.code !== 200 || !descrizioneResponse.data.data) {
-      return res.status(400).json({ error: 'Invalid FICR data' });
-    }
-    
-    const eventoData = descrizioneResponse.data.data[0];
-    
-    // Costruisci l'URL del PDF
-    // Dal browser: https://enduro.ficr.it/#/END/pdf/Campionato%20Regionale%20Enduro/2025/107/303/1
-    // URL reale PDF: https://dati.ficr.it/utilities/RAL/Campionato Regionale Enduro/2025/107/303/1
-    const pdfPath = url.split('/END/pdf/')[1];
-    const pdfUrl = `https://dati.ficr.it/utilities/RAL/${pdfPath}`;
-    
-    console.log(`Downloading PDF from: ${pdfUrl}`);
-    
-    // Scarica il PDF
-    const pdfResponse = await axios.get(pdfUrl, { 
-      responseType: 'arraybuffer',
-      timeout: 30000
-    });
-    
-    console.log(`PDF downloaded, size: ${pdfResponse.data.byteLength} bytes`);
-    
-    // Parse PDF con pdfjs
-    const loadingTask = pdfjsLib.getDocument({
-      data: new Uint8Array(pdfResponse.data)
-    });
-    const pdfDocument = await loadingTask.promise;
-    
-    console.log(`PDF has ${pdfDocument.numPages} pages`);
-    
-    let text = '';
-    for (let i = 1; i <= pdfDocument.numPages; i++) {
-      const page = await pdfDocument.getPage(i);
-      const content = await page.getTextContent();
-      const pageText = content.items.map(item => item.str).join(' ');
-      text += pageText + '\n';
-    }
-    
-    console.log(`Extracted text length: ${text.length} characters`);
-    
-    // Estrai piloti dal testo del PDF
-    // Pattern: numero nome cognome anno PAR CO1 CO2 ARR
-    // Esempio: "101 PELLIZZARO Davide (PD) 1999 9.00 11.45 14.30 15.00"
-    const pilotiRegex = /(\d+)\s+([A-Z]+)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+\(([A-Z]{2})\)\s+(\d{4})\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)/g;
-    
-    const piloti = [];
-    let match;
-    
-    while ((match = pilotiRegex.exec(text)) !== null) {
-      piloti.push({
-        numero_gara: parseInt(match[1]),
-        cognome: match[2],
-        nome: match[3],
-        provincia: match[4],
-        anno_nascita: parseInt(match[5]),
-        par: match[6],
-        co1: match[7],
-        co2: match[8],
-        arr: match[9]
-      });
-    }
-    
-    console.log(`Found ${piloti.length} piloti in PDF`);
-    
-    if (piloti.length === 0) {
-      console.log('Sample text from PDF:', text.substring(0, 500));
-      return res.status(400).json({ 
-        error: 'No pilots found in PDF. Check PDF format.',
-        sample_text: text.substring(0, 500)
-      });
-    }
-    
-    // Importa nel database
-    let importedCount = 0;
-    const errors = [];
-    
-    for (const pilota of piloti) {
-      try {
-        await pool.query(
-          `INSERT INTO piloti (nome, cognome, numero_gara, categoria, id_evento, email, telefono)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (numero_gara, id_evento) DO NOTHING`,
-          [
-            pilota.nome,
-            pilota.cognome,
-            pilota.numero_gara,
-            null,
-            id_evento,
-            null,
-            null
-          ]
-        );
-        importedCount++;
-      } catch (error) {
-        errors.push({
-          pilota: `${pilota.numero_gara} ${pilota.nome} ${pilota.cognome}`,
-          error: error.message
-        });
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: `Successfully imported ${importedCount} piloti from FICR`,
-      evento: {
-        nome: eventoData.ma_Descrizione1,
-        localita: eventoData.ma_Localita,
-        data: eventoData.ma_Data
-      },
-      piloti_trovati: piloti.length,
-      piloti_importati: importedCount,
-      errors: errors.length > 0 ? errors : undefined
-    });
-    
-  } catch (error) {
-    console.error('Import error:', error);
-    res.status(500).json({ 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-});
-
-// ============================================
 // EVENTI ENDPOINTS
 // ============================================
 
-// Get all eventi
 app.get('/api/eventi', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
@@ -204,7 +53,6 @@ app.get('/api/eventi', async (req, res) => {
   }
 });
 
-// Create evento
 app.post('/api/eventi', async (req, res) => {
   try {
     const { nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id } = req.body;
@@ -226,7 +74,6 @@ app.post('/api/eventi', async (req, res) => {
 // CATEGORIE ENDPOINTS
 // ============================================
 
-// Get all categorie
 app.get('/api/categorie', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
@@ -236,7 +83,6 @@ app.get('/api/categorie', async (req, res) => {
   }
 });
 
-// Create categoria
 app.post('/api/categorie', async (req, res) => {
   try {
     const { nome_categoria, descrizione, id_evento } = req.body;
@@ -256,7 +102,6 @@ app.post('/api/categorie', async (req, res) => {
 // PILOTI ENDPOINTS
 // ============================================
 
-// Get all piloti
 app.get('/api/piloti', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM piloti ORDER BY numero_gara');
@@ -266,7 +111,6 @@ app.get('/api/piloti', async (req, res) => {
   }
 });
 
-// Create pilota
 app.post('/api/piloti', async (req, res) => {
   try {
     const { nome, cognome, numero_gara, categoria, email, telefono, id_evento } = req.body;
@@ -284,7 +128,6 @@ app.post('/api/piloti', async (req, res) => {
   }
 });
 
-// Delete pilota
 app.delete('/api/piloti/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -308,7 +151,6 @@ app.delete('/api/piloti/:id', async (req, res) => {
 // PROVE SPECIALI ENDPOINTS
 // ============================================
 
-// Get all prove speciali
 app.get('/api/prove-speciali', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM prove_speciali ORDER BY numero_ordine');
@@ -318,10 +160,9 @@ app.get('/api/prove-speciali', async (req, res) => {
   }
 });
 
-// Create prova speciale
 app.post('/api/prove-speciali', async (req, res) => {
   try {
-    const { nome_ps, numero_ordine, distanza_km, id_evento } = req.body;
+    const { nome_ps, numero_ordine, id_evento } = req.body;
     
     const result = await pool.query(
       `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento)
@@ -340,7 +181,6 @@ app.post('/api/prove-speciali', async (req, res) => {
 // TEMPI ENDPOINTS
 // ============================================
 
-// Get all tempi with pilot data (for classifiche)
 app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -357,7 +197,6 @@ app.get('/api/tempi', async (req, res) => {
       ORDER BY t.tempo_secondi ASC
     `);
     
-    // Converti tempo_secondi in minuti, secondi, centesimi per il frontend
     const tempiFormatted = result.rows.map(tempo => {
       const tempoTotale = parseFloat(tempo.tempo_secondi) || 0;
       const minuti = Math.floor(tempoTotale / 60);
@@ -378,12 +217,10 @@ app.get('/api/tempi', async (req, res) => {
   }
 });
 
-// Create tempo
 app.post('/api/tempi', async (req, res) => {
   try {
     const { id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita } = req.body;
     
-    // Calcola tempo_secondi totale
     const tempoTotaleSecondi = (tempo_minuti * 60) + tempo_secondi + (tempo_centesimi / 100);
     
     const result = await pool.query(
@@ -399,7 +236,6 @@ app.post('/api/tempi', async (req, res) => {
   }
 });
 
-// Update tempo
 app.put('/api/tempi/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -427,7 +263,6 @@ app.put('/api/tempi/:id', async (req, res) => {
 // CLASSIFICHE ENDPOINTS
 // ============================================
 
-// Get classifiche
 app.get('/api/classifiche', async (req, res) => {
   try {
     const result = await pool.query(`
