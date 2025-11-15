@@ -1,6 +1,8 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const axios = require('axios');
+const pdf = require('pdf-parse');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -36,6 +38,115 @@ app.get('/api/test-db', async (req, res) => {
     const result = await pool.query('SELECT NOW()');
     res.json({ success: true, time: result.rows[0] });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// IMPORT FICR ENDPOINT
+// ============================================
+
+app.post('/api/import-ficr', async (req, res) => {
+  try {
+    const { url, id_evento } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+    
+    // Estrai parametri dall'URL
+    // URL format: https://enduro.ficr.it/#/END/pdf/Campionato%20Regionale%20Enduro/2025/107/303/1
+    const urlParts = url.split('/');
+    const anno = urlParts[urlParts.length - 3];
+    const codiceEquipe = urlParts[urlParts.length - 2];
+    const manifestazione = urlParts[urlParts.length - 1];
+    
+    console.log(`Importing data for: ${anno}/${codiceEquipe}/${manifestazione}`);
+    
+    // Chiama API FICR per descrizione evento
+    const descrizioneUrl = `https://apienduro.ficr.it/END/mpcache-30/get/descrizione/${anno}/${codiceEquipe}/${manifestazione}`;
+    const descrizioneResponse = await axios.get(descrizioneUrl);
+    
+    if (descrizioneResponse.data.code !== 200 || !descrizioneResponse.data.data) {
+      return res.status(400).json({ error: 'Invalid FICR data' });
+    }
+    
+    const eventoData = descrizioneResponse.data.data[0];
+    
+    // Scarica il PDF dalla FICR
+    const pdfUrl = url.replace('https://enduro.ficr.it/#/END/pdf/', 'https://dati.ficr.it/utilities/RAL/');
+    const pdfResponse = await axios.get(pdfUrl, { 
+      responseType: 'arraybuffer',
+      timeout: 30000
+    });
+    
+    // Parse PDF
+    const pdfData = await pdf(pdfResponse.data);
+    const text = pdfData.text;
+    
+    // Estrai piloti dal testo del PDF
+    // Pattern: numero nome cognome anno PAR CO1 CO2 ARR
+    const pilotiRegex = /(\d+)\s+(\d+)\s+([A-Z]+)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+\(([A-Z]{2})\)\s+(\d{4})\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)/g;
+    
+    const piloti = [];
+    let match;
+    
+    while ((match = pilotiRegex.exec(text)) !== null) {
+      piloti.push({
+        numero_progressivo: parseInt(match[1]),
+        numero_gara: parseInt(match[2]),
+        cognome: match[3],
+        nome: match[4],
+        provincia: match[5],
+        anno_nascita: parseInt(match[6]),
+        par: match[7],
+        co1: match[8],
+        co2: match[9],
+        arr: match[10]
+      });
+    }
+    
+    console.log(`Found ${piloti.length} piloti in PDF`);
+    
+    // Importa nel database
+    let importedCount = 0;
+    
+    for (const pilota of piloti) {
+      try {
+        await pool.query(
+          `INSERT INTO piloti (nome, cognome, numero_gara, categoria, id_evento, email, telefono)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT DO NOTHING`,
+          [
+            pilota.nome,
+            pilota.cognome,
+            pilota.numero_gara,
+            null, // categoria da determinare
+            id_evento,
+            null,
+            null
+          ]
+        );
+        importedCount++;
+      } catch (error) {
+        console.error(`Error importing pilota ${pilota.numero_gara}:`, error.message);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Successfully imported ${importedCount} piloti from FICR`,
+      evento: {
+        nome: eventoData.ma_Descrizione1,
+        localita: eventoData.ma_Localita,
+        data: eventoData.ma_Data
+      },
+      piloti_trovati: piloti.length,
+      piloti_importati: importedCount
+    });
+    
+  } catch (error) {
+    console.error('Import error:', error);
     res.status(500).json({ error: error.message });
   }
 });
