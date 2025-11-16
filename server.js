@@ -276,7 +276,7 @@ app.post('/api/prove-speciali', async (req, res) => {
 });
 
 // ============================================
-// TEMPI ENDPOINTS (FIX: aggiunto id_ps)
+// TEMPI ENDPOINTS (FIX: mantieni tempo_secondi RAW)
 // ============================================
 
 app.get('/api/tempi', async (req, res) => {
@@ -304,6 +304,7 @@ app.get('/api/tempi', async (req, res) => {
       
       return {
         ...tempo,
+        tempo_secondi_raw: tempoTotale, // AGGIUNTO: tempo raw per ordinamento frontend
         tempo_minuti: minuti,
         tempo_secondi: secondi,
         tempo_centesimi: centesimi
