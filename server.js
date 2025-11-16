@@ -47,10 +47,14 @@ app.get('/api/test-db', async (req, res) => {
 
 app.post('/api/import-ficr', async (req, res) => {
   try {
-    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento } = req.body;
+    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento, id_ps } = req.body;
     
     if (!id_evento) {
       return res.status(400).json({ error: 'id_evento è obbligatorio' });
+    }
+    
+    if (!id_ps) {
+      return res.status(400).json({ error: 'id_ps è obbligatorio' });
     }
     
     // URL API FICR per i tempi
@@ -105,11 +109,11 @@ app.post('/api/import-ficr', async (req, res) => {
           idPilota = pilotaExists.rows[0].id;
         }
         
-        // Inserisci tempo
+        // Inserisci tempo con id_ps
         await pool.query(
           `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-           VALUES ($1, NULL, $2, 0)`,
-          [idPilota, tempoSecondi]
+           VALUES ($1, $2, $3, 0)`,
+          [idPilota, id_ps, tempoSecondi]
         );
         
         importati++;
