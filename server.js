@@ -276,7 +276,7 @@ app.post('/api/prove-speciali', async (req, res) => {
 });
 
 // ============================================
-// TEMPI ENDPOINTS
+// TEMPI ENDPOINTS (FIX: aggiunto id_ps)
 // ============================================
 
 app.get('/api/tempi', async (req, res) => {
@@ -284,6 +284,7 @@ app.get('/api/tempi', async (req, res) => {
     const result = await pool.query(`
       SELECT 
         t.id,
+        t.id_ps,
         t.tempo_secondi,
         t.penalita_secondi,
         p.id as id_pilota,
