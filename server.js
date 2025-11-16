@@ -47,7 +47,11 @@ app.get('/api/test-db', async (req, res) => {
 
 app.post('/api/import-ficr', async (req, res) => {
   try {
-    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria } = req.body;
+    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento } = req.body;
+    
+    if (!id_evento) {
+      return res.status(400).json({ error: 'id_evento è obbligatorio' });
+    }
     
     // URL API FICR per i tempi
     const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
@@ -80,21 +84,21 @@ app.post('/api/import-ficr', async (req, res) => {
           tempoSecondi = parseFloat(parts[0]);
         }
         
-        // Verifica se il pilota esiste già
+        // Verifica se il pilota esiste già per questo evento
         const pilotaExists = await pool.query(
-          'SELECT id FROM piloti WHERE numero_gara = $1',
-          [pilota.Numero]
+          'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
+          [pilota.Numero, id_evento]
         );
         
         let idPilota;
         
         if (pilotaExists.rows.length === 0) {
-          // Crea nuovo pilota (SENZA categoria)
+          // Crea nuovo pilota
           const newPilota = await pool.query(
-            `INSERT INTO piloti (nome, cognome, numero_gara)
-             VALUES ($1, $2, $3)
+            `INSERT INTO piloti (nome, cognome, numero_gara, id_evento)
+             VALUES ($1, $2, $3, $4)
              RETURNING id`,
-            [pilota.Nome, pilota.Cognome, pilota.Numero]
+            [pilota.Nome, pilota.Cognome, pilota.Numero, id_evento]
           );
           idPilota = newPilota.rows[0].id;
         } else {
@@ -145,13 +149,13 @@ app.get('/api/eventi', async (req, res) => {
 
 app.post('/api/eventi', async (req, res) => {
   try {
-    const { nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id } = req.body;
+    const { nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id, stato)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'attivo')
+      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id, stato)
+       VALUES ($1, $2, $3, $4, $5, $6, 'attivo')
        RETURNING *`,
-      [nome_evento, codice_gara, data_inizio, data_fine, location, descrizione, organizzatore_id]
+      [nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id]
     );
     
     res.status(201).json(result.rows[0]);
@@ -203,7 +207,7 @@ app.get('/api/piloti', async (req, res) => {
 
 app.post('/api/piloti', async (req, res) => {
   try {
-    const { nome, cognome, numero_gara, categoria, email, telefono, id_evento } = req.body;
+    const { nome, cognome, numero_gara, email, telefono, id_evento } = req.body;
     
     const result = await pool.query(
       `INSERT INTO piloti (nome, cognome, numero_gara, email, telefono, id_evento)
