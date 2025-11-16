@@ -149,13 +149,13 @@ app.get('/api/eventi', async (req, res) => {
 
 app.post('/api/eventi', async (req, res) => {
   try {
-    const { nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id } = req.body;
+    const { nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id, stato)
+      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione, stato)
        VALUES ($1, $2, $3, $4, $5, $6, 'attivo')
        RETURNING *`,
-      [nome_evento, codice_gara, data_inizio, data_fine, descrizione, organizzatore_id]
+      [nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione]
     );
     
     res.status(201).json(result.rows[0]);
