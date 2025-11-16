@@ -1,6 +1,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -36,6 +37,96 @@ app.get('/api/test-db', async (req, res) => {
     const result = await pool.query('SELECT NOW()');
     res.json({ success: true, time: result.rows[0] });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// IMPORT FICR ENDPOINT
+// ============================================
+
+app.post('/api/import-ficr', async (req, res) => {
+  try {
+    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria } = req.body;
+    
+    // URL API FICR per i tempi
+    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
+    
+    console.log('Fetching from FICR:', url);
+    
+    // Chiama API FICR
+    const response = await axios.get(url);
+    
+    if (!response.data || !response.data.data || !response.data.data.clasdella) {
+      return res.status(404).json({ error: 'Nessun dato trovato dall\'API FICR' });
+    }
+    
+    const piloti = response.data.data.clasdella;
+    
+    let importati = 0;
+    let errori = 0;
+    
+    // Importa ogni pilota
+    for (const pilota of piloti) {
+      try {
+        // Converti tempo da formato FICR (4'41.21) a secondi decimali
+        const tempoStr = pilota.Tempo.replace(/'/g, ':').replace(/"/g, '');
+        const parts = tempoStr.split(':');
+        let tempoSecondi = 0;
+        
+        if (parts.length === 2) {
+          tempoSecondi = parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+        } else {
+          tempoSecondi = parseFloat(parts[0]);
+        }
+        
+        // Verifica se il pilota esiste già
+        const pilotaExists = await pool.query(
+          'SELECT id FROM piloti WHERE numero_gara = $1',
+          [pilota.Numero]
+        );
+        
+        let idPilota;
+        
+        if (pilotaExists.rows.length === 0) {
+          // Crea nuovo pilota
+          const newPilota = await pool.query(
+            `INSERT INTO piloti (nome, cognome, numero_gara, categoria)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id`,
+            [pilota.Nome, pilota.Cognome, pilota.Numero, pilota.Categoria]
+          );
+          idPilota = newPilota.rows[0].id;
+        } else {
+          idPilota = pilotaExists.rows[0].id;
+        }
+        
+        // Inserisci tempo (assumendo che la prova speciale esista già)
+        // Per ora usiamo id_ps = NULL, poi potrai collegarlo
+        await pool.query(
+          `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+           VALUES ($1, NULL, $2, 0)`,
+          [idPilota, tempoSecondi]
+        );
+        
+        importati++;
+        
+      } catch (error) {
+        console.error(`Errore importando pilota ${pilota.Numero}:`, error.message);
+        errori++;
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Import completato: ${importati} piloti importati, ${errori} errori`,
+      totale: piloti.length,
+      importati,
+      errori
+    });
+    
+  } catch (error) {
+    console.error('Errore import FICR:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
