@@ -89,20 +89,19 @@ app.post('/api/import-ficr', async (req, res) => {
         let idPilota;
         
         if (pilotaExists.rows.length === 0) {
-          // Crea nuovo pilota
+          // Crea nuovo pilota (SENZA categoria)
           const newPilota = await pool.query(
-            `INSERT INTO piloti (nome, cognome, numero_gara, categoria)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO piloti (nome, cognome, numero_gara)
+             VALUES ($1, $2, $3)
              RETURNING id`,
-            [pilota.Nome, pilota.Cognome, pilota.Numero, pilota.Categoria]
+            [pilota.Nome, pilota.Cognome, pilota.Numero]
           );
           idPilota = newPilota.rows[0].id;
         } else {
           idPilota = pilotaExists.rows[0].id;
         }
         
-        // Inserisci tempo (assumendo che la prova speciale esista già)
-        // Per ora usiamo id_ps = NULL, poi potrai collegarlo
+        // Inserisci tempo
         await pool.query(
           `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
            VALUES ($1, NULL, $2, 0)`,
@@ -207,10 +206,10 @@ app.post('/api/piloti', async (req, res) => {
     const { nome, cognome, numero_gara, categoria, email, telefono, id_evento } = req.body;
     
     const result = await pool.query(
-      `INSERT INTO piloti (nome, cognome, numero_gara, categoria, email, telefono, id_evento)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO piloti (nome, cognome, numero_gara, email, telefono, id_evento)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [nome, cognome, numero_gara, categoria, email, telefono, id_evento]
+      [nome, cognome, numero_gara, email, telefono, id_evento]
     );
     
     res.status(201).json(result.rows[0]);
