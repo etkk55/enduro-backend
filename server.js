@@ -31,6 +31,22 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
+// ==================== MIGRATION ====================
+app.get('/api/migrate', async (req, res) => {
+  try {
+    // Aggiungi colonne classe e moto se non esistono
+    await pool.query(`
+      ALTER TABLE piloti 
+      ADD COLUMN IF NOT EXISTS classe VARCHAR(50),
+      ADD COLUMN IF NOT EXISTS moto VARCHAR(100)
+    `);
+    
+    res.json({ success: true, message: 'Colonne classe e moto aggiunte con successo' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== EVENTI ====================
 
 app.get('/api/eventi', async (req, res) => {
@@ -183,8 +199,8 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         p.numero_gara,
         p.nome,
         p.cognome,
-        p.classe,
-        p.moto,
+        COALESCE(p.classe, '') as classe,
+        COALESCE(p.moto, '') as moto,
         ps.nome_ps
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
@@ -198,8 +214,8 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         p.numero_gara,
         p.nome,
         p.cognome,
-        p.classe,
-        p.moto,
+        COALESCE(p.classe, '') as classe,
+        COALESCE(p.moto, '') as moto,
         SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
       FROM piloti p
       JOIN tempi t ON p.id = t.id_pilota
@@ -346,7 +362,6 @@ app.get('/api/classifiche/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
   try {
-    // QUERY CORRETTA: conta le prove dell'evento e filtra solo piloti di quell'evento
     const result = await pool.query(`
       WITH prove_evento AS (
         SELECT COUNT(*) as totale_prove
@@ -357,9 +372,9 @@ app.get('/api/classifiche/:id_evento', async (req, res) => {
         p.numero_gara,
         p.nome,
         p.cognome,
-        p.classe,
-        p.moto,
-        p.team,
+        COALESCE(p.classe, '') as classe,
+        COALESCE(p.moto, '') as moto,
+        COALESCE(p.team, '') as team,
         SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
         COUNT(DISTINCT t.id_ps) as prove_completate,
         (SELECT totale_prove FROM prove_evento) as totale_prove_evento
