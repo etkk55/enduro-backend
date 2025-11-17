@@ -46,54 +46,88 @@ app.get('/api/migrate', async (req, res) => {
   }
 });
 
-// ==================== FIX NOMI PROVE ====================
-app.get('/api/fix-nomi-prove/:id_evento', async (req, res) => {
+// ==================== AGGIORNA NOMI PROVE DA FICR ====================
+app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
   try {
-    // Mappa dei nomi corretti per Vestenanova 2025
-    const nomiProve = {
-      2: 'PS2 ET1 Enduro Test 1 "Viale"',
-      3: 'PS3 CT2 Cross Test 2 "Mainente"',
-      4: 'PS4 CT3 Cross Test 3 "Collina Verde"',
-      5: 'PS5 ET2 Enduro Test 2 "Viale"',
-      6: 'PS6 CT4 Cross Test 4 "Mainente"',
-      7: 'PS7 CT5 Cross Test 5 "Collina Verde"',
-      8: 'PS8 ET3 Enduro Test 3 "Viale"',
-      10: 'PS10 CT6 Cross Test 6 "Mainente"'
-    };
+    // 1. Recupera info evento
+    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
     
+    const evento = eventoResult.rows[0];
+    const [manifestazione, giorno] = evento.codice_gara.split('-');
+    const anno = new Date(evento.data_inizio).getFullYear();
+    
+    // 2. Determina categoria
+    let categoria = 1; // Default: Campionato
+    if (evento.nome_evento.toLowerCase().includes('training')) {
+      categoria = 2;
+    } else if (evento.nome_evento.toLowerCase().includes('regolarità') || evento.nome_evento.toLowerCase().includes('epoca')) {
+      categoria = 3;
+    }
+    
+    // 3. Chiama API FICR per ottenere programma prove
+    const urlProgram = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/107/${manifestazione}/${categoria}`;
+    const programResponse = await axios.get(urlProgram);
+    
+    if (!programResponse.data?.data || programResponse.data.data.length === 0) {
+      return res.status(404).json({ error: 'Nessuna prova trovata su FICR' });
+    }
+    
+    const proveFICR = programResponse.data.data; // Array ordinato delle prove
+    
+    // 4. Recupera prove dal database (ordinate per numero_ordine)
+    const proveDBResult = await pool.query(
+      'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine ASC',
+      [id_evento]
+    );
+    
+    if (proveDBResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Nessuna prova trovata nel database per questo evento' });
+    }
+    
+    const proveDB = proveDBResult.rows;
+    
+    // 5. Aggiorna i nomi delle prove
     let aggiornate = 0;
     const dettagli = [];
     
-    for (const [numeroOrdine, nomeCorretto] of Object.entries(nomiProve)) {
-      const result = await pool.query(
-        `UPDATE prove_speciali 
-         SET nome_ps = $1 
-         WHERE numero_ordine = $2 AND id_evento = $3
-         RETURNING *`,
-        [nomeCorretto, parseInt(numeroOrdine), id_evento]
+    for (let i = 0; i < Math.min(proveFICR.length, proveDB.length); i++) {
+      const provaFICR = proveFICR[i];
+      const provaDB = proveDB[i];
+      
+      const nomeNuovo = `${provaFICR.Sigla} ${provaFICR.Description}`;
+      
+      await pool.query(
+        'UPDATE prove_speciali SET nome_ps = $1 WHERE id = $2',
+        [nomeNuovo, provaDB.id]
       );
       
-      if (result.rowCount > 0) {
-        aggiornate++;
-        dettagli.push({
-          numero_ordine: numeroOrdine,
-          nome_nuovo: nomeCorretto,
-          aggiornata: true
-        });
-      }
+      aggiornate++;
+      dettagli.push({
+        posizione: i + 1,
+        numero_ordine_db: provaDB.numero_ordine,
+        nome_vecchio: provaDB.nome_ps,
+        nome_nuovo: nomeNuovo,
+        sigla: provaFICR.Sigla,
+        stage_number_ficr: provaFICR.StageNumber
+      });
     }
     
     res.json({
       success: true,
+      totale_prove_ficr: proveFICR.length,
+      totale_prove_db: proveDB.length,
       aggiornate: aggiornate,
       dettagli: dettagli,
-      message: `Aggiornate ${aggiornate} prove su ${Object.keys(nomiProve).length}`
+      message: `Aggiornate ${aggiornate} prove con successo`
     });
     
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
@@ -217,80 +251,6 @@ app.post('/api/prove-speciali', async (req, res) => {
       [nome_ps, numero_ordine, id_evento]
     );
     res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== AGGIORNA NOMI PROVE ====================
-app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
-  const { id_evento } = req.params;
-  
-  try {
-    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    
-    const evento = eventoResult.rows[0];
-    const [manifestazione, giorno] = evento.codice_gara.split('-');
-    const anno = new Date(evento.data_inizio).getFullYear();
-    
-    const proveResult = await pool.query(
-      'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
-      [id_evento]
-    );
-    
-    let aggiornate = 0;
-    let errori = 0;
-    const dettagli = [];
-    
-    for (const prova of proveResult.rows) {
-      try {
-        let categoria = 1;
-        if (evento.nome_evento.toLowerCase().includes('training')) {
-          categoria = 2;
-        } else if (evento.nome_evento.toLowerCase().includes('regolarità') || evento.nome_evento.toLowerCase().includes('epoca')) {
-          categoria = 3;
-        }
-        
-        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/107/${manifestazione}/${giorno}/${prova.numero_ordine}/${categoria}/*/*/*/*/*`;
-        const response = await axios.get(url);
-        
-        if (response.data?.data?.anagraficaps?.DescrProva) {
-          const nomeNuovo = response.data.data.anagraficaps.DescrProva;
-          
-          await pool.query(
-            'UPDATE prove_speciali SET nome_ps = $1 WHERE id = $2',
-            [nomeNuovo, prova.id]
-          );
-          
-          aggiornate++;
-          dettagli.push({
-            numero_ordine: prova.numero_ordine,
-            nome_vecchio: prova.nome_ps,
-            nome_nuovo: nomeNuovo
-          });
-        }
-      } catch (err) {
-        errori++;
-        console.error(`Errore prova ${prova.numero_ordine}:`, err.message);
-        dettagli.push({
-          numero_ordine: prova.numero_ordine,
-          errore: err.message
-        });
-      }
-    }
-    
-    res.json({
-      success: true,
-      totale_prove: proveResult.rows.length,
-      aggiornate: aggiornate,
-      errori: errori,
-      dettagli: dettagli,
-      message: `Aggiornate ${aggiornate} prove su ${proveResult.rows.length}`
-    });
-    
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -769,17 +729,6 @@ app.post('/api/import-ficr', async (req, res) => {
     
     const piloti = response.data.data.clasdella;
     
-    const nomeProvaFICR = response.data.data.anagraficaps?.DescrProva;
-    
-    if (nomeProvaFICR && id_ps) {
-      await pool.query(
-        `UPDATE prove_speciali 
-         SET nome_ps = $1 
-         WHERE id = $2`,
-        [nomeProvaFICR, id_ps]
-      );
-    }
-    
     let pilotiImportati = 0;
     let pilotiAggiornati = 0;
     let tempiImportati = 0;
@@ -843,8 +792,7 @@ app.post('/api/import-ficr', async (req, res) => {
       pilotiImportati, 
       pilotiAggiornati,
       tempiImportati,
-      totale: piloti.length,
-      nome_prova_aggiornato: nomeProvaFICR || null
+      totale: piloti.length
     });
     
   } catch (err) {
