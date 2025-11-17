@@ -1,6 +1,6 @@
 const express = require('express');
-const { Pool } = require('pg');
 const cors = require('cors');
+const { Pool } = require('pg');
 const axios = require('axios');
 
 const app = express();
@@ -16,374 +16,382 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Test database connection
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Error connecting to database:', err.stack);
-  } else {
-    console.log('Successfully connected to database');
-    release();
-  }
-});
-
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  res.json({ status: 'healthy' });
 });
 
-// Test database endpoint
+// Test database connection
 app.get('/api/test-db', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
-    res.json({ success: true, time: result.rows[0] });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json({ success: true, time: result.rows[0].now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
-// IMPORT FICR ENDPOINT
-// ============================================
+// ==================== EVENTI ====================
 
-app.post('/api/import-ficr', async (req, res) => {
-  try {
-    const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento, id_ps } = req.body;
-    
-    if (!id_evento) {
-      return res.status(400).json({ error: 'id_evento è obbligatorio' });
-    }
-    
-    if (!id_ps) {
-      return res.status(400).json({ error: 'id_ps è obbligatorio' });
-    }
-    
-    // URL API FICR per i tempi
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
-    
-    console.log('Fetching from FICR:', url);
-    
-    // Chiama API FICR
-    const response = await axios.get(url);
-    
-    if (!response.data || !response.data.data || !response.data.data.clasdella) {
-      return res.status(404).json({ error: 'Nessun dato trovato dall\'API FICR' });
-    }
-    
-    const piloti = response.data.data.clasdella;
-    
-    let importati = 0;
-    let errori = 0;
-    
-    // Importa ogni pilota
-    for (const pilota of piloti) {
-      try {
-        // Converti tempo da formato FICR (4'41.21) a secondi decimali
-        const tempoStr = pilota.Tempo.replace(/'/g, ':').replace(/"/g, '');
-        const parts = tempoStr.split(':');
-        let tempoSecondi = 0;
-        
-        if (parts.length === 2) {
-          tempoSecondi = parseInt(parts[0]) * 60 + parseFloat(parts[1]);
-        } else {
-          tempoSecondi = parseFloat(parts[0]);
-        }
-        
-        // Verifica se il pilota esiste già per questo evento
-        const pilotaExists = await pool.query(
-          'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
-          [pilota.Numero, id_evento]
-        );
-        
-        let idPilota;
-        
-        if (pilotaExists.rows.length === 0) {
-          // Crea nuovo pilota
-          const newPilota = await pool.query(
-            `INSERT INTO piloti (nome, cognome, numero_gara, id_evento)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id`,
-            [pilota.Nome, pilota.Cognome, pilota.Numero, id_evento]
-          );
-          idPilota = newPilota.rows[0].id;
-        } else {
-          idPilota = pilotaExists.rows[0].id;
-        }
-        
-        // Inserisci tempo con id_ps
-        await pool.query(
-          `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-           VALUES ($1, $2, $3, 0)`,
-          [idPilota, id_ps, tempoSecondi]
-        );
-        
-        importati++;
-        
-      } catch (error) {
-        console.error(`Errore importando pilota ${pilota.Numero}:`, error.message);
-        errori++;
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: `Import completato: ${importati} piloti importati, ${errori} errori`,
-      totale: piloti.length,
-      importati,
-      errori
-    });
-    
-  } catch (error) {
-    console.error('Errore import FICR:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// EVENTI ENDPOINTS
-// ============================================
-
+// GET tutti gli eventi
 app.get('/api/eventi', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// POST crea nuovo evento
 app.post('/api/eventi', async (req, res) => {
+  const { nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione } = req.body;
+  
   try {
-    const { nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione } = req.body;
-    
     const result = await pool.query(
-      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione, stato)
-       VALUES ($1, $2, $3, $4, $5, $6, 'attivo')
+      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione, stato)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'attivo')
        RETURNING *`,
-      [nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione]
+      [nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione]
     );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
-// CATEGORIE ENDPOINTS
-// ============================================
-
-app.get('/api/categorie', async (req, res) => {
+// DELETE evento
+app.delete('/api/eventi/:id', async (req, res) => {
+  const { id } = req.params;
+  
   try {
-    const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    // Elimina tempi collegati
+    await pool.query('DELETE FROM tempi WHERE id_pilota IN (SELECT id FROM piloti WHERE id_evento = $1)', [id]);
+    
+    // Elimina piloti collegati
+    await pool.query('DELETE FROM piloti WHERE id_evento = $1', [id]);
+    
+    // Elimina prove speciali collegate
+    await pool.query('DELETE FROM prove_speciali WHERE id_evento = $1', [id]);
+    
+    // Elimina evento
+    await pool.query('DELETE FROM eventi WHERE id = $1', [id]);
+    
+    res.json({ message: 'Evento eliminato con successo' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/categorie', async (req, res) => {
-  try {
-    const { nome_categoria, descrizione, id_evento } = req.body;
-    
-    const result = await pool.query(
-      'INSERT INTO categorie (nome_categoria, descrizione, id_evento) VALUES ($1, $2, $3) RETURNING *',
-      [nome_categoria, descrizione, id_evento]
-    );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+// ==================== PILOTI ====================
 
-// ============================================
-// PILOTI ENDPOINTS
-// ============================================
-
+// GET tutti i piloti
 app.get('/api/piloti', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM piloti ORDER BY numero_gara');
+    const result = await pool.query(`
+      SELECT p.*, e.nome_evento 
+      FROM piloti p
+      LEFT JOIN eventi e ON p.id_evento = e.id
+      ORDER BY p.numero_gara
+    `);
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// POST crea nuovo pilota
 app.post('/api/piloti', async (req, res) => {
+  const { numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento } = req.body;
+  
   try {
-    const { nome, cognome, numero_gara, email, telefono, id_evento } = req.body;
-    
     const result = await pool.query(
-      `INSERT INTO piloti (nome, cognome, numero_gara, email, telefono, id_evento)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO piloti (numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [nome, cognome, numero_gara, email, telefono, id_evento]
+      [numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento]
     );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// DELETE pilota
 app.delete('/api/piloti/:id', async (req, res) => {
+  const { id } = req.params;
+  
   try {
-    const { id } = req.params;
-    
-    const result = await pool.query(
-      'DELETE FROM piloti WHERE id = $1 RETURNING *',
-      [id]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Pilota non trovato' });
-    }
-    
-    res.json({ message: 'Pilota eliminato', pilota: result.rows[0] });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    await pool.query('DELETE FROM piloti WHERE id = $1', [id]);
+    res.json({ message: 'Pilota eliminato' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
-// PROVE SPECIALI ENDPOINTS
-// ============================================
+// ==================== PROVE SPECIALI ====================
 
+// GET tutte le prove speciali
 app.get('/api/prove-speciali', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM prove_speciali ORDER BY numero_ordine');
+    const result = await pool.query(`
+      SELECT ps.*, e.nome_evento 
+      FROM prove_speciali ps
+      LEFT JOIN eventi e ON ps.id_evento = e.id
+      ORDER BY ps.numero_ordine
+    `);
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// POST crea nuova prova speciale
 app.post('/api/prove-speciali', async (req, res) => {
+  const { nome_ps, numero_ordine, id_evento } = req.body;
+  
   try {
-    const { nome_ps, numero_ordine, id_evento } = req.body;
-    
     const result = await pool.query(
-      `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento)
-       VALUES ($1, $2, $3)
+      `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato)
+       VALUES ($1, $2, $3, 'attiva')
        RETURNING *`,
       [nome_ps, numero_ordine, id_evento]
     );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
-// TEMPI ENDPOINTS (FIX: mantieni tempo_secondi RAW)
-// ============================================
+// ==================== TEMPI ====================
 
+// GET tutti i tempi (con formattazione)
 app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
         t.id,
-        t.id_ps,
         t.tempo_secondi,
         t.penalita_secondi,
-        p.id as id_pilota,
+        p.numero_gara,
         p.nome,
         p.cognome,
-        p.numero_gara
+        ps.nome_ps,
+        ps.numero_ordine,
+        e.nome_evento,
+        t.id_pilota,
+        t.id_ps
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
-      ORDER BY t.tempo_secondi ASC
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      JOIN eventi e ON ps.id_evento = e.id
+      ORDER BY ps.numero_ordine, t.tempo_secondi
     `);
     
-    const tempiFormatted = result.rows.map(tempo => {
-      const tempoTotale = parseFloat(tempo.tempo_secondi) || 0;
-      const minuti = Math.floor(tempoTotale / 60);
-      const secondi = Math.floor(tempoTotale % 60);
-      const centesimi = Math.round((tempoTotale % 1) * 100);
+    // Formatta i tempi
+    const tempiFormattati = result.rows.map(row => {
+      const minuti = Math.floor(row.tempo_secondi / 60);
+      const secondi = (row.tempo_secondi % 60).toFixed(2);
       
       return {
-        ...tempo,
-        tempo_secondi_raw: tempoTotale, // AGGIUNTO: tempo raw per ordinamento frontend
-        tempo_minuti: minuti,
-        tempo_secondi: secondi,
-        tempo_centesimi: centesimi
+        ...row,
+        tempo_formattato: `${minuti}'${secondi.padStart(5, '0')}`,
+        tempo_secondi_raw: row.tempo_secondi
       };
     });
     
-    res.json(tempiFormatted);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(tempiFormattati);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// POST inserisci nuovo tempo
 app.post('/api/tempi', async (req, res) => {
+  const { id_pilota, id_ps, tempo_secondi, penalita_secondi } = req.body;
+  
   try {
-    const { id_pilota, id_ps, tempo_minuti, tempo_secondi, tempo_centesimi, penalita } = req.body;
-    
-    const tempoTotaleSecondi = (tempo_minuti * 60) + tempo_secondi + (tempo_centesimi / 100);
-    
     const result = await pool.query(
       `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
        VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [id_pilota, id_ps, tempoTotaleSecondi, penalita || 0]
+      [id_pilota, id_ps, tempo_secondi, penalita_secondi || 0]
     );
-    
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// PUT aggiorna tempo
 app.put('/api/tempi/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tempo_secondi, penalita_secondi } = req.body;
+  
   try {
-    const { id } = req.params;
-    const { tempo_secondi, penalita_secondi } = req.body;
-    
     const result = await pool.query(
       `UPDATE tempi 
-       SET tempo_secondi = $1, penalita_secondi = $2, updated_at = CURRENT_TIMESTAMP
+       SET tempo_secondi = $1, penalita_secondi = $2
        WHERE id = $3
        RETURNING *`,
       [tempo_secondi, penalita_secondi, id]
     );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Tempo non trovato' });
-    }
-    
     res.json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
-// CLASSIFICHE ENDPOINTS
-// ============================================
+// ==================== CLASSIFICHE ====================
 
+// GET classifica generale
 app.get('/api/classifiche', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        p.id,
+        p.numero_gara,
         p.nome,
         p.cognome,
-        p.numero_gara,
-        SUM(t.tempo_secondi) as tempo_totale
+        e.nome_evento,
+        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
       FROM piloti p
-      LEFT JOIN tempi t ON p.id = t.id_pilota
-      GROUP BY p.id, p.nome, p.cognome, p.numero_gara
-      ORDER BY tempo_totale ASC NULLS LAST
+      JOIN tempi t ON p.id = t.id_pilota
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      JOIN eventi e ON p.id_evento = e.id
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, e.nome_evento
+      ORDER BY tempo_totale ASC
     `);
+    
+    // Formatta tempi e calcola distacchi
+    const classificaFormattata = result.rows.map((row, index) => {
+      const minuti = Math.floor(row.tempo_totale / 60);
+      const secondi = (row.tempo_totale % 60).toFixed(2);
+      
+      let distacco = '';
+      if (index > 0) {
+        const diff = row.tempo_totale - result.rows[0].tempo_totale;
+        const diffMinuti = Math.floor(diff / 60);
+        const diffSecondi = (diff % 60).toFixed(2);
+        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}`;
+      }
+      
+      return {
+        posizione: index + 1,
+        numero_gara: row.numero_gara,
+        pilota: `${row.nome} ${row.cognome}`,
+        evento: row.nome_evento,
+        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}`,
+        tempo_totale_raw: row.tempo_totale,
+        distacco: distacco
+      };
+    });
+    
+    res.json(classificaFormattata);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== IMPORT FICR ====================
+
+// Funzione per convertire tempo FICR in secondi
+function convertiTempoFICR(tempoStr) {
+  if (!tempoStr || tempoStr === '') return null;
+  
+  const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
+  if (!match) return null;
+  
+  const minuti = parseInt(match[1]);
+  const secondi = parseFloat(match[2]);
+  
+  return minuti * 60 + secondi;
+}
+
+// POST import dati da FICR
+app.post('/api/import-ficr', async (req, res) => {
+  const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento, id_ps } = req.body;
+  
+  try {
+    // Chiama API FICR
+    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
+    const response = await axios.get(url);
+    
+    if (!response.data || !response.data.data || !response.data.data.clasdella) {
+      return res.status(404).json({ error: 'Dati non trovati su FICR' });
+    }
+    
+    const piloti = response.data.data.clasdella;
+    
+    let pilotiImportati = 0;
+    let tempiImportati = 0;
+    
+    for (const pilotaFICR of piloti) {
+      // Cerca pilota esistente
+      let pilotaId;
+      const pilotaEsistente = await pool.query(
+        'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
+        [pilotaFICR.Numero, id_evento]
+      );
+      
+      if (pilotaEsistente.rows.length > 0) {
+        pilotaId = pilotaEsistente.rows[0].id;
+      } else {
+        // Crea nuovo pilota
+        const nuovoPilota = await pool.query(
+          `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id`,
+          [
+            pilotaFICR.Numero,
+            pilotaFICR.Nome,
+            pilotaFICR.Cognome,
+            pilotaFICR.Motoclub || '',
+            pilotaFICR.Naz || '',
+            id_evento
+          ]
+        );
+        pilotaId = nuovoPilota.rows[0].id;
+        pilotiImportati++;
+      }
+      
+      // Converti e inserisci tempo
+      const tempoSecondi = convertiTempoFICR(pilotaFICR.Tempo);
+      if (tempoSecondi !== null) {
+        await pool.query(
+          `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+           VALUES ($1, $2, $3, 0)
+           ON CONFLICT DO NOTHING`,
+          [pilotaId, id_ps, tempoSecondi]
+        );
+        tempiImportati++;
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      pilotiImportati, 
+      tempiImportati,
+      totale: piloti.length
+    });
+    
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== CATEGORIE ====================
+
+// GET tutte le categorie
+app.get('/api/categorie', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
