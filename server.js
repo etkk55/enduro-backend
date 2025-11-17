@@ -254,7 +254,9 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
     }
     
     const eventoId = psInfo.rows[0].evento_id;
+    const numeroOrdineCorrente = psInfo.rows[0].numero_ordine;
     
+    // Classifica della prova
     const tempiProva = await pool.query(`
       SELECT 
         t.id,
@@ -273,13 +275,13 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
       ORDER BY t.tempo_secondi ASC
     `, [id_ps]);
     
-    // Query migliorata: filtra solo chi ha fatto TUTTE le prove fino a questa
+    // Classifica dopo la prova corrente (con filtro ritirati)
     const tempiCumulativi = await pool.query(`
       WITH prove_fino_a_qui AS (
         SELECT COUNT(*) as num_prove
         FROM prove_speciali
         WHERE id_evento = $1 
-          AND numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
+          AND numero_ordine <= $2
       )
       SELECT 
         p.numero_gara,
@@ -293,11 +295,66 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
       JOIN tempi t ON p.id = t.id_pilota
       JOIN prove_speciali ps ON t.id_ps = ps.id
       WHERE p.id_evento = $1 
-        AND ps.numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
+        AND ps.numero_ordine <= $2
       GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
       HAVING COUNT(DISTINCT t.id_ps) = (SELECT num_prove FROM prove_fino_a_qui)
       ORDER BY tempo_totale ASC
-    `, [eventoId, id_ps]);
+    `, [eventoId, numeroOrdineCorrente]);
+    
+    // Classifica della prova PRECEDENTE (se esiste)
+    let tempiPrecedenti = [];
+    if (numeroOrdineCorrente > 2) {
+      tempiPrecedenti = await pool.query(`
+        WITH prove_fino_a_precedente AS (
+          SELECT COUNT(*) as num_prove
+          FROM prove_speciali
+          WHERE id_evento = $1 
+            AND numero_ordine < $2
+        )
+        SELECT 
+          p.numero_gara,
+          SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
+          ROW_NUMBER() OVER (ORDER BY SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) ASC) as posizione_precedente
+        FROM piloti p
+        JOIN tempi t ON p.id = t.id_pilota
+        JOIN prove_speciali ps ON t.id_ps = ps.id
+        WHERE p.id_evento = $1 
+          AND ps.numero_ordine < $2
+        GROUP BY p.id, p.numero_gara
+        HAVING COUNT(DISTINCT t.id_ps) = (SELECT num_prove FROM prove_fino_a_precedente)
+        ORDER BY tempo_totale ASC
+      `, [eventoId, numeroOrdineCorrente]);
+    }
+    
+    // Mappa posizioni precedenti
+    const posizioniPrecedenti = {};
+    tempiPrecedenti.rows.forEach(row => {
+      posizioniPrecedenti[row.numero_gara] = parseInt(row.posizione_precedente);
+    });
+    
+    // Conta totale piloti e ritirati
+    const totaliResult = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT p.id) as totale_piloti,
+        COUNT(DISTINCT CASE 
+          WHEN (
+            SELECT COUNT(DISTINCT t2.id_ps) 
+            FROM tempi t2 
+            JOIN prove_speciali ps2 ON t2.id_ps = ps2.id 
+            WHERE t2.id_pilota = p.id AND ps2.numero_ordine <= $2
+          ) < (
+            SELECT COUNT(*) FROM prove_speciali WHERE id_evento = $1 AND numero_ordine <= $2
+          ) 
+          THEN p.id 
+        END) as ritirati
+      FROM piloti p
+      WHERE p.id_evento = $1
+        AND EXISTS (
+          SELECT 1 FROM tempi t 
+          JOIN prove_speciali ps ON t.id_ps = ps.id 
+          WHERE t.id_pilota = p.id AND ps.id_evento = $1
+        )
+    `, [eventoId, numeroOrdineCorrente]);
     
     const classificaDella = tempiProva.rows.map((row, index) => {
       const minuti = Math.floor(row.tempo_secondi / 60);
@@ -333,22 +390,43 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         distacco = `+${diffMin}'${diffSec.padStart(5, '0')}"`;
       }
       
+      const posizioneAttuale = index + 1;
+      const posizionePrecedente = posizioniPrecedenti[row.numero_gara];
+      
+      let variazione = null;
+      if (posizionePrecedente) {
+        const diff = posizionePrecedente - posizioneAttuale;
+        if (diff > 0) {
+          variazione = { tipo: 'up', valore: diff }; // Guadagnato posizioni
+        } else if (diff < 0) {
+          variazione = { tipo: 'down', valore: Math.abs(diff) }; // Perso posizioni
+        } else {
+          variazione = { tipo: 'same', valore: 0 }; // Stessa posizione
+        }
+      }
+      
       return {
-        posizione: index + 1,
+        posizione: posizioneAttuale,
         numero_gara: row.numero_gara,
         pilota: `${row.nome} ${row.cognome}`,
         classe: row.classe || '',
         moto: row.moto || '',
         tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
         tempo_raw: row.tempo_totale,
-        distacco: distacco
+        distacco: distacco,
+        variazione: variazione
       };
     });
     
     res.json({
       prova_info: psInfo.rows[0],
       classifica_della: classificaDella,
-      classifica_dopo: classificaDopo
+      classifica_dopo: classificaDopo,
+      statistiche: {
+        piloti_classificati: tempiCumulativi.rows.length,
+        ritirati: totaliResult.rows[0].ritirati,
+        totale_piloti: totaliResult.rows[0].totale_piloti
+      }
     });
     
   } catch (err) {
