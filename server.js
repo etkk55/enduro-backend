@@ -644,6 +644,19 @@ app.post('/api/import-ficr', async (req, res) => {
     
     const piloti = response.data.data.clasdella;
     
+    // ✅ MODIFICA: Estrai nome prova da anagraficaps
+    const nomeProvaFICR = response.data.data.anagraficaps?.DescrProva;
+    
+    // ✅ MODIFICA: Aggiorna nome prova se disponibile
+    if (nomeProvaFICR && id_ps) {
+      await pool.query(
+        `UPDATE prove_speciali 
+         SET nome_ps = $1 
+         WHERE id = $2`,
+        [nomeProvaFICR, id_ps]
+      );
+    }
+    
     let pilotiImportati = 0;
     let pilotiAggiornati = 0;
     let tempiImportati = 0;
@@ -707,7 +720,8 @@ app.post('/api/import-ficr', async (req, res) => {
       pilotiImportati, 
       pilotiAggiornati,
       tempiImportati,
-      totale: piloti.length
+      totale: piloti.length,
+      nome_prova_aggiornato: nomeProvaFICR || null
     });
     
   } catch (err) {
