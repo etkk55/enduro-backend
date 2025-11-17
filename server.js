@@ -46,6 +46,57 @@ app.get('/api/migrate', async (req, res) => {
   }
 });
 
+// ==================== FIX NOMI PROVE ====================
+app.get('/api/fix-nomi-prove/:id_evento', async (req, res) => {
+  const { id_evento } = req.params;
+  
+  try {
+    // Mappa dei nomi corretti per Vestenanova 2025
+    const nomiProve = {
+      2: 'PS2 ET1 Enduro Test 1 "Viale"',
+      3: 'PS3 CT2 Cross Test 2 "Mainente"',
+      4: 'PS4 CT3 Cross Test 3 "Collina Verde"',
+      5: 'PS5 ET2 Enduro Test 2 "Viale"',
+      6: 'PS6 CT4 Cross Test 4 "Mainente"',
+      7: 'PS7 CT5 Cross Test 5 "Collina Verde"',
+      8: 'PS8 ET3 Enduro Test 3 "Viale"',
+      10: 'PS10 CT6 Cross Test 6 "Mainente"'
+    };
+    
+    let aggiornate = 0;
+    const dettagli = [];
+    
+    for (const [numeroOrdine, nomeCorretto] of Object.entries(nomiProve)) {
+      const result = await pool.query(
+        `UPDATE prove_speciali 
+         SET nome_ps = $1 
+         WHERE numero_ordine = $2 AND id_evento = $3
+         RETURNING *`,
+        [nomeCorretto, parseInt(numeroOrdine), id_evento]
+      );
+      
+      if (result.rowCount > 0) {
+        aggiornate++;
+        dettagli.push({
+          numero_ordine: numeroOrdine,
+          nome_nuovo: nomeCorretto,
+          aggiornata: true
+        });
+      }
+    }
+    
+    res.json({
+      success: true,
+      aggiornate: aggiornate,
+      dettagli: dettagli,
+      message: `Aggiornate ${aggiornate} prove su ${Object.keys(nomiProve).length}`
+    });
+    
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== EVENTI ====================
 
 app.get('/api/eventi', async (req, res) => {
@@ -176,7 +227,6 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
   try {
-    // Ottieni info evento
     const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
     if (eventoResult.rows.length === 0) {
       return res.status(404).json({ error: 'Evento non trovato' });
@@ -186,7 +236,6 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
     const [manifestazione, giorno] = evento.codice_gara.split('-');
     const anno = new Date(evento.data_inizio).getFullYear();
     
-    // Ottieni tutte le prove dell'evento
     const proveResult = await pool.query(
       'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
       [id_evento]
@@ -196,11 +245,9 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
     let errori = 0;
     const dettagli = [];
     
-    // Per ogni prova, chiama FICR e aggiorna il nome
     for (const prova of proveResult.rows) {
       try {
-        // Determina la categoria dal nome evento (euristica)
-        let categoria = 1; // Default Campionato
+        let categoria = 1;
         if (evento.nome_evento.toLowerCase().includes('training')) {
           categoria = 2;
         } else if (evento.nome_evento.toLowerCase().includes('regolarità') || evento.nome_evento.toLowerCase().includes('epoca')) {
@@ -722,10 +769,8 @@ app.post('/api/import-ficr', async (req, res) => {
     
     const piloti = response.data.data.clasdella;
     
-    // ✅ MODIFICA: Estrai nome prova da anagraficaps
     const nomeProvaFICR = response.data.data.anagraficaps?.DescrProva;
     
-    // ✅ MODIFICA: Aggiorna nome prova se disponibile
     if (nomeProvaFICR && id_ps) {
       await pool.query(
         `UPDATE prove_speciali 
