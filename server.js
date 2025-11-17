@@ -303,7 +303,7 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
     
     // Classifica della prova PRECEDENTE (se esiste)
     let tempiPrecedenti = [];
-    if (numeroOrdineCorrente > 2) {
+    if (numeroOrdineCorrente > 1) {
       tempiPrecedenti = await pool.query(`
         WITH prove_fino_a_precedente AS (
           SELECT COUNT(*) as num_prove
