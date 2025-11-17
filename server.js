@@ -65,16 +65,9 @@ app.delete('/api/eventi/:id', async (req, res) => {
   const { id } = req.params;
   
   try {
-    // Elimina tempi collegati
     await pool.query('DELETE FROM tempi WHERE id_pilota IN (SELECT id FROM piloti WHERE id_evento = $1)', [id]);
-    
-    // Elimina piloti collegati
     await pool.query('DELETE FROM piloti WHERE id_evento = $1', [id]);
-    
-    // Elimina prove speciali collegate
     await pool.query('DELETE FROM prove_speciali WHERE id_evento = $1', [id]);
-    
-    // Elimina evento
     await pool.query('DELETE FROM eventi WHERE id = $1', [id]);
     
     res.json({ message: 'Evento eliminato con successo' });
@@ -131,14 +124,22 @@ app.delete('/api/piloti/:id', async (req, res) => {
 
 // ==================== PROVE SPECIALI ====================
 
-// GET tutte le prove speciali
+// GET tutte le prove speciali (CON NOME EVENTO)
 app.get('/api/prove-speciali', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT ps.*, e.nome_evento 
+      SELECT 
+        ps.id,
+        ps.nome_ps,
+        ps.numero_ordine,
+        ps.id_evento,
+        ps.stato,
+        ps.created_at,
+        e.nome_evento,
+        CONCAT(ps.nome_ps, ' - ', e.nome_evento) as nome_completo
       FROM prove_speciali ps
       LEFT JOIN eventi e ON ps.id_evento = e.id
-      ORDER BY ps.numero_ordine
+      ORDER BY e.nome_evento, ps.numero_ordine
     `);
     res.json(result.rows);
   } catch (err) {
@@ -165,7 +166,114 @@ app.post('/api/prove-speciali', async (req, res) => {
 
 // ==================== TEMPI ====================
 
-// GET tutti i tempi (con formattazione)
+// GET tempi per una prova specifica (CON CLASSIFICA DELLA PROVA + CUMULATIVA)
+app.get('/api/tempi/:id_ps', async (req, res) => {
+  const { id_ps } = req.params;
+  
+  try {
+    // Ottieni info prova e evento
+    const psInfo = await pool.query(`
+      SELECT ps.*, e.id as evento_id, e.nome_evento
+      FROM prove_speciali ps
+      JOIN eventi e ON ps.id_evento = e.id
+      WHERE ps.id = $1
+    `, [id_ps]);
+    
+    if (psInfo.rows.length === 0) {
+      return res.status(404).json({ error: 'Prova speciale non trovata' });
+    }
+    
+    const eventoId = psInfo.rows[0].evento_id;
+    
+    // Classifica DELLA prova (singola)
+    const tempiProva = await pool.query(`
+      SELECT 
+        t.id,
+        t.tempo_secondi,
+        t.penalita_secondi,
+        p.numero_gara,
+        p.nome,
+        p.cognome,
+        ps.nome_ps
+      FROM tempi t
+      JOIN piloti p ON t.id_pilota = p.id
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      WHERE t.id_ps = $1
+      ORDER BY t.tempo_secondi ASC
+    `, [id_ps]);
+    
+    // Classifica DOPO la prova (cumulativa fino a questa prova inclusa)
+    const tempiCumulativi = await pool.query(`
+      SELECT 
+        p.numero_gara,
+        p.nome,
+        p.cognome,
+        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
+      FROM piloti p
+      JOIN tempi t ON p.id_pilota = p.id
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      WHERE p.id_evento = $1 
+        AND ps.numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome
+      ORDER BY tempo_totale ASC
+    `, [eventoId, id_ps]);
+    
+    // Formatta tempi della prova
+    const classificaDella = tempiProva.rows.map((row, index) => {
+      const minuti = Math.floor(row.tempo_secondi / 60);
+      const secondi = (row.tempo_secondi % 60).toFixed(2);
+      
+      let distacco = '';
+      if (index > 0) {
+        const diff = row.tempo_secondi - tempiProva.rows[0].tempo_secondi;
+        distacco = `+${diff.toFixed(2)}s`;
+      }
+      
+      return {
+        posizione: index + 1,
+        numero_gara: row.numero_gara,
+        pilota: `${row.nome} ${row.cognome}`,
+        tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
+        tempo_raw: row.tempo_secondi,
+        distacco: distacco
+      };
+    });
+    
+    // Formatta tempi cumulativi
+    const classificaDopo = tempiCumulativi.rows.map((row, index) => {
+      const minuti = Math.floor(row.tempo_totale / 60);
+      const secondi = (row.tempo_totale % 60).toFixed(2);
+      
+      let distacco = '';
+      if (index > 0) {
+        const diff = row.tempo_totale - tempiCumulativi.rows[0].tempo_totale;
+        const diffMin = Math.floor(diff / 60);
+        const diffSec = (diff % 60).toFixed(2);
+        distacco = `+${diffMin}'${diffSec.padStart(5, '0')}"`;
+      }
+      
+      return {
+        posizione: index + 1,
+        numero_gara: row.numero_gara,
+        pilota: `${row.nome} ${row.cognome}`,
+        tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
+        tempo_raw: row.tempo_totale,
+        distacco: distacco
+      };
+    });
+    
+    res.json({
+      prova_info: psInfo.rows[0],
+      classifica_della: classificaDella,
+      classifica_dopo: classificaDopo
+    });
+    
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET tutti i tempi (legacy - per compatibilità)
 app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -188,7 +296,6 @@ app.get('/api/tempi', async (req, res) => {
       ORDER BY ps.numero_ordine, t.tempo_secondi
     `);
     
-    // Formatta i tempi
     const tempiFormattati = result.rows.map(row => {
       const minuti = Math.floor(row.tempo_secondi / 60);
       const secondi = (row.tempo_secondi % 60).toFixed(2);
@@ -244,7 +351,56 @@ app.put('/api/tempi/:id', async (req, res) => {
 
 // ==================== CLASSIFICHE ====================
 
-// GET classifica generale
+// GET classifica per evento specifico
+app.get('/api/classifiche/:id_evento', async (req, res) => {
+  const { id_evento } = req.params;
+  
+  try {
+    const result = await pool.query(`
+      SELECT 
+        p.numero_gara,
+        p.nome,
+        p.cognome,
+        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
+        COUNT(t.id) as prove_completate
+      FROM piloti p
+      JOIN tempi t ON p.id = t.id_pilota
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      WHERE p.id_evento = $1
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome
+      ORDER BY tempo_totale ASC
+    `, [id_evento]);
+    
+    const classificaFormattata = result.rows.map((row, index) => {
+      const minuti = Math.floor(row.tempo_totale / 60);
+      const secondi = (row.tempo_totale % 60).toFixed(2);
+      
+      let distacco = '';
+      if (index > 0) {
+        const diff = row.tempo_totale - result.rows[0].tempo_totale;
+        const diffMinuti = Math.floor(diff / 60);
+        const diffSecondi = (diff % 60).toFixed(2);
+        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}"`;
+      }
+      
+      return {
+        posizione: index + 1,
+        numero_gara: row.numero_gara,
+        pilota: `${row.nome} ${row.cognome}`,
+        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}"`,
+        tempo_totale_raw: row.tempo_totale,
+        distacco: distacco,
+        prove_completate: row.prove_completate
+      };
+    });
+    
+    res.json(classificaFormattata);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET classifica generale (tutte)
 app.get('/api/classifiche', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -262,7 +418,6 @@ app.get('/api/classifiche', async (req, res) => {
       ORDER BY tempo_totale ASC
     `);
     
-    // Formatta tempi e calcola distacchi
     const classificaFormattata = result.rows.map((row, index) => {
       const minuti = Math.floor(row.tempo_totale / 60);
       const secondi = (row.tempo_totale % 60).toFixed(2);
@@ -272,7 +427,7 @@ app.get('/api/classifiche', async (req, res) => {
         const diff = row.tempo_totale - result.rows[0].tempo_totale;
         const diffMinuti = Math.floor(diff / 60);
         const diffSecondi = (diff % 60).toFixed(2);
-        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}`;
+        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}"`;
       }
       
       return {
@@ -280,7 +435,7 @@ app.get('/api/classifiche', async (req, res) => {
         numero_gara: row.numero_gara,
         pilota: `${row.nome} ${row.cognome}`,
         evento: row.nome_evento,
-        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}`,
+        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}"`,
         tempo_totale_raw: row.tempo_totale,
         distacco: distacco
       };
@@ -294,7 +449,6 @@ app.get('/api/classifiche', async (req, res) => {
 
 // ==================== IMPORT FICR ====================
 
-// Funzione per convertire tempo FICR in secondi
 function convertiTempoFICR(tempoStr) {
   if (!tempoStr || tempoStr === '') return null;
   
@@ -307,12 +461,10 @@ function convertiTempoFICR(tempoStr) {
   return minuti * 60 + secondi;
 }
 
-// POST import dati da FICR
 app.post('/api/import-ficr', async (req, res) => {
   const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento, id_ps } = req.body;
   
   try {
-    // Chiama API FICR
     const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
     const response = await axios.get(url);
     
@@ -326,7 +478,6 @@ app.post('/api/import-ficr', async (req, res) => {
     let tempiImportati = 0;
     
     for (const pilotaFICR of piloti) {
-      // Cerca pilota esistente
       let pilotaId;
       const pilotaEsistente = await pool.query(
         'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
@@ -336,7 +487,6 @@ app.post('/api/import-ficr', async (req, res) => {
       if (pilotaEsistente.rows.length > 0) {
         pilotaId = pilotaEsistente.rows[0].id;
       } else {
-        // Crea nuovo pilota
         const nuovoPilota = await pool.query(
           `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento)
            VALUES ($1, $2, $3, $4, $5, $6)
@@ -354,7 +504,6 @@ app.post('/api/import-ficr', async (req, res) => {
         pilotiImportati++;
       }
       
-      // Converti e inserisci tempo
       const tempoSecondi = convertiTempoFICR(pilotaFICR.Tempo);
       if (tempoSecondi !== null) {
         await pool.query(
@@ -381,7 +530,6 @@ app.post('/api/import-ficr', async (req, res) => {
 
 // ==================== CATEGORIE ====================
 
-// GET tutte le categorie
 app.get('/api/categorie', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
