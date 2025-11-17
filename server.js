@@ -34,7 +34,6 @@ app.get('/api/test-db', async (req, res) => {
 // ==================== MIGRATION ====================
 app.get('/api/migrate', async (req, res) => {
   try {
-    // Aggiungi colonne classe e moto se non esistono
     await pool.query(`
       ALTER TABLE piloti 
       ADD COLUMN IF NOT EXISTS classe VARCHAR(50),
@@ -358,6 +357,7 @@ app.put('/api/tempi/:id', async (req, res) => {
 
 // ==================== CLASSIFICHE ====================
 
+// CLASSIFICA PER EVENTO - SOLO PILOTI CHE HANNO COMPLETATO TUTTE LE PROVE
 app.get('/api/classifiche/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
@@ -383,6 +383,7 @@ app.get('/api/classifiche/:id_evento', async (req, res) => {
       JOIN prove_speciali ps ON t.id_ps = ps.id
       WHERE p.id_evento = $1 AND ps.id_evento = $1
       GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto, p.team
+      HAVING COUNT(DISTINCT t.id_ps) = (SELECT totale_prove FROM prove_evento)
       ORDER BY tempo_totale ASC
     `, [id_evento]);
     
@@ -493,6 +494,7 @@ app.post('/api/import-ficr', async (req, res) => {
     const piloti = response.data.data.clasdella;
     
     let pilotiImportati = 0;
+    let pilotiAggiornati = 0;
     let tempiImportati = 0;
     
     for (const pilotaFICR of piloti) {
@@ -504,6 +506,20 @@ app.post('/api/import-ficr', async (req, res) => {
       
       if (pilotaEsistente.rows.length > 0) {
         pilotaId = pilotaEsistente.rows[0].id;
+        
+        // Aggiorna classe e moto se non esistono
+        await pool.query(
+          `UPDATE piloti 
+           SET classe = COALESCE(NULLIF(classe, ''), $1),
+               moto = COALESCE(NULLIF(moto, ''), $2)
+           WHERE id = $3`,
+          [
+            pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
+            pilotaFICR.Moto || '',
+            pilotaId
+          ]
+        );
+        pilotiAggiornati++;
       } else {
         const nuovoPilota = await pool.query(
           `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento, classe, moto)
@@ -539,6 +555,7 @@ app.post('/api/import-ficr', async (req, res) => {
     res.json({ 
       success: true, 
       pilotiImportati, 
+      pilotiAggiornati,
       tempiImportati,
       totale: piloti.length
     });
