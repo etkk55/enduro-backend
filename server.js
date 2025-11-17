@@ -33,7 +33,6 @@ app.get('/api/test-db', async (req, res) => {
 
 // ==================== EVENTI ====================
 
-// GET tutti gli eventi
 app.get('/api/eventi', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
@@ -43,7 +42,6 @@ app.get('/api/eventi', async (req, res) => {
   }
 });
 
-// POST crea nuovo evento
 app.post('/api/eventi', async (req, res) => {
   const { nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione } = req.body;
   
@@ -60,7 +58,6 @@ app.post('/api/eventi', async (req, res) => {
   }
 });
 
-// DELETE evento
 app.delete('/api/eventi/:id', async (req, res) => {
   const { id } = req.params;
   
@@ -78,7 +75,6 @@ app.delete('/api/eventi/:id', async (req, res) => {
 
 // ==================== PILOTI ====================
 
-// GET tutti i piloti
 app.get('/api/piloti', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -93,16 +89,15 @@ app.get('/api/piloti', async (req, res) => {
   }
 });
 
-// POST crea nuovo pilota
 app.post('/api/piloti', async (req, res) => {
-  const { numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento } = req.body;
+  const { numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe, moto } = req.body;
   
   try {
     const result = await pool.query(
-      `INSERT INTO piloti (numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO piloti (numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe, moto)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento]
+      [numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe || '', moto || '']
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -110,7 +105,6 @@ app.post('/api/piloti', async (req, res) => {
   }
 });
 
-// DELETE pilota
 app.delete('/api/piloti/:id', async (req, res) => {
   const { id } = req.params;
   
@@ -124,7 +118,6 @@ app.delete('/api/piloti/:id', async (req, res) => {
 
 // ==================== PROVE SPECIALI ====================
 
-// GET tutte le prove speciali (CON NOME EVENTO)
 app.get('/api/prove-speciali', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -147,7 +140,6 @@ app.get('/api/prove-speciali', async (req, res) => {
   }
 });
 
-// POST crea nuova prova speciale
 app.post('/api/prove-speciali', async (req, res) => {
   const { nome_ps, numero_ordine, id_evento } = req.body;
   
@@ -166,12 +158,10 @@ app.post('/api/prove-speciali', async (req, res) => {
 
 // ==================== TEMPI ====================
 
-// GET tempi per una prova specifica (CON CLASSIFICA DELLA PROVA + CUMULATIVA)
 app.get('/api/tempi/:id_ps', async (req, res) => {
   const { id_ps } = req.params;
   
   try {
-    // Ottieni info prova e evento
     const psInfo = await pool.query(`
       SELECT ps.*, e.id as evento_id, e.nome_evento
       FROM prove_speciali ps
@@ -185,7 +175,6 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
     
     const eventoId = psInfo.rows[0].evento_id;
     
-    // Classifica DELLA prova (singola)
     const tempiProva = await pool.query(`
       SELECT 
         t.id,
@@ -194,6 +183,8 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         p.numero_gara,
         p.nome,
         p.cognome,
+        p.classe,
+        p.moto,
         ps.nome_ps
       FROM tempi t
       JOIN piloti p ON t.id_pilota = p.id
@@ -202,23 +193,23 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
       ORDER BY t.tempo_secondi ASC
     `, [id_ps]);
     
-    // Classifica DOPO la prova (cumulativa fino a questa prova inclusa)
     const tempiCumulativi = await pool.query(`
       SELECT 
         p.numero_gara,
         p.nome,
         p.cognome,
+        p.classe,
+        p.moto,
         SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
       FROM piloti p
-      JOIN tempi t ON p.id_pilota = p.id
+      JOIN tempi t ON p.id = t.id_pilota
       JOIN prove_speciali ps ON t.id_ps = ps.id
       WHERE p.id_evento = $1 
         AND ps.numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
-      GROUP BY p.id, p.numero_gara, p.nome, p.cognome
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
       ORDER BY tempo_totale ASC
     `, [eventoId, id_ps]);
     
-    // Formatta tempi della prova
     const classificaDella = tempiProva.rows.map((row, index) => {
       const minuti = Math.floor(row.tempo_secondi / 60);
       const secondi = (row.tempo_secondi % 60).toFixed(2);
@@ -233,13 +224,14 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         posizione: index + 1,
         numero_gara: row.numero_gara,
         pilota: `${row.nome} ${row.cognome}`,
+        classe: row.classe || '',
+        moto: row.moto || '',
         tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
         tempo_raw: row.tempo_secondi,
         distacco: distacco
       };
     });
     
-    // Formatta tempi cumulativi
     const classificaDopo = tempiCumulativi.rows.map((row, index) => {
       const minuti = Math.floor(row.tempo_totale / 60);
       const secondi = (row.tempo_totale % 60).toFixed(2);
@@ -256,6 +248,8 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
         posizione: index + 1,
         numero_gara: row.numero_gara,
         pilota: `${row.nome} ${row.cognome}`,
+        classe: row.classe || '',
+        moto: row.moto || '',
         tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
         tempo_raw: row.tempo_totale,
         distacco: distacco
@@ -273,7 +267,6 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
   }
 });
 
-// GET tutti i tempi (legacy - per compatibilità)
 app.get('/api/tempi', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -313,7 +306,6 @@ app.get('/api/tempi', async (req, res) => {
   }
 });
 
-// POST inserisci nuovo tempo
 app.post('/api/tempi', async (req, res) => {
   const { id_pilota, id_ps, tempo_secondi, penalita_secondi } = req.body;
   
@@ -330,7 +322,6 @@ app.post('/api/tempi', async (req, res) => {
   }
 });
 
-// PUT aggiorna tempo
 app.put('/api/tempi/:id', async (req, res) => {
   const { id } = req.params;
   const { tempo_secondi, penalita_secondi } = req.body;
@@ -351,23 +342,32 @@ app.put('/api/tempi/:id', async (req, res) => {
 
 // ==================== CLASSIFICHE ====================
 
-// GET classifica per evento specifico
 app.get('/api/classifiche/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
   try {
+    // QUERY CORRETTA: conta le prove dell'evento e filtra solo piloti di quell'evento
     const result = await pool.query(`
+      WITH prove_evento AS (
+        SELECT COUNT(*) as totale_prove
+        FROM prove_speciali
+        WHERE id_evento = $1
+      )
       SELECT 
         p.numero_gara,
         p.nome,
         p.cognome,
+        p.classe,
+        p.moto,
+        p.team,
         SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
-        COUNT(t.id) as prove_completate
+        COUNT(DISTINCT t.id_ps) as prove_completate,
+        (SELECT totale_prove FROM prove_evento) as totale_prove_evento
       FROM piloti p
       JOIN tempi t ON p.id = t.id_pilota
       JOIN prove_speciali ps ON t.id_ps = ps.id
-      WHERE p.id_evento = $1
-      GROUP BY p.id, p.numero_gara, p.nome, p.cognome
+      WHERE p.id_evento = $1 AND ps.id_evento = $1
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto, p.team
       ORDER BY tempo_totale ASC
     `, [id_evento]);
     
@@ -387,10 +387,14 @@ app.get('/api/classifiche/:id_evento', async (req, res) => {
         posizione: index + 1,
         numero_gara: row.numero_gara,
         pilota: `${row.nome} ${row.cognome}`,
+        classe: row.classe || '',
+        moto: row.moto || '',
+        team: row.team || '',
         tempo_totale: `${minuti}'${secondi.padStart(5, '0')}"`,
         tempo_totale_raw: row.tempo_totale,
         distacco: distacco,
-        prove_completate: row.prove_completate
+        prove_completate: row.prove_completate,
+        totale_prove: row.totale_prove_evento
       };
     });
     
@@ -400,7 +404,6 @@ app.get('/api/classifiche/:id_evento', async (req, res) => {
   }
 });
 
-// GET classifica generale (tutte)
 app.get('/api/classifiche', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -488,8 +491,8 @@ app.post('/api/import-ficr', async (req, res) => {
         pilotaId = pilotaEsistente.rows[0].id;
       } else {
         const nuovoPilota = await pool.query(
-          `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento, classe, moto)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id`,
           [
             pilotaFICR.Numero,
@@ -497,7 +500,9 @@ app.post('/api/import-ficr', async (req, res) => {
             pilotaFICR.Cognome,
             pilotaFICR.Motoclub || '',
             pilotaFICR.Naz || '',
-            id_evento
+            id_evento,
+            pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
+            pilotaFICR.Moto || ''
           ]
         );
         pilotaId = nuovoPilota.rows[0].id;
@@ -539,7 +544,6 @@ app.get('/api/categorie', async (req, res) => {
   }
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
