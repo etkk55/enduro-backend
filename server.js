@@ -171,6 +171,76 @@ app.post('/api/prove-speciali', async (req, res) => {
   }
 });
 
+// ==================== AGGIORNA CLASSE/MOTO ====================
+app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
+  const { id_evento } = req.params;
+  
+  try {
+    // Ottieni info evento
+    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    
+    const evento = eventoResult.rows[0];
+    
+    // Estrai parametri FICR dal codice_gara (formato: "manifestazione-giorno")
+    const [manifestazione, giorno] = evento.codice_gara.split('-');
+    const anno = new Date(evento.data_inizio).getFullYear();
+    
+    // Ottieni tutti i piloti dell'evento
+    const pilotiResult = await pool.query(
+      'SELECT * FROM piloti WHERE id_evento = $1',
+      [id_evento]
+    );
+    
+    let aggiornati = 0;
+    let errori = 0;
+    
+    // Per ogni pilota, cerca i suoi dati su FICR (usa prova 2 come riferimento)
+    for (const pilota of pilotiResult.rows) {
+      try {
+        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/107/${manifestazione}/${giorno}/2/1/*/*/*/*/*`;
+        const response = await axios.get(url);
+        
+        if (response.data?.data?.clasdella) {
+          const pilotaFICR = response.data.data.clasdella.find(
+            p => p.Numero === pilota.numero_gara
+          );
+          
+          if (pilotaFICR) {
+            await pool.query(
+              `UPDATE piloti 
+               SET classe = $1, moto = $2
+               WHERE id = $3`,
+              [
+                pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
+                pilotaFICR.Moto || '',
+                pilota.id
+              ]
+            );
+            aggiornati++;
+          }
+        }
+      } catch (err) {
+        errori++;
+        console.error(`Errore pilota ${pilota.numero_gara}:`, err.message);
+      }
+    }
+    
+    res.json({
+      success: true,
+      totale_piloti: pilotiResult.rows.length,
+      aggiornati: aggiornati,
+      errori: errori,
+      message: `Aggiornati ${aggiornati} piloti su ${pilotiResult.rows.length}`
+    });
+    
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== TEMPI ====================
 
 app.get('/api/tempi/:id_ps', async (req, res) => {
@@ -357,7 +427,6 @@ app.put('/api/tempi/:id', async (req, res) => {
 
 // ==================== CLASSIFICHE ====================
 
-// CLASSIFICA PER EVENTO - SOLO PILOTI CHE HANNO COMPLETATO TUTTE LE PROVE
 app.get('/api/classifiche/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
@@ -507,7 +576,6 @@ app.post('/api/import-ficr', async (req, res) => {
       if (pilotaEsistente.rows.length > 0) {
         pilotaId = pilotaEsistente.rows[0].id;
         
-        // Aggiorna classe e moto se non esistono
         await pool.query(
           `UPDATE piloti 
            SET classe = COALESCE(NULLIF(classe, ''), $1),
