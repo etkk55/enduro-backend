@@ -171,6 +171,84 @@ app.post('/api/prove-speciali', async (req, res) => {
   }
 });
 
+// ==================== AGGIORNA NOMI PROVE ====================
+app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
+  const { id_evento } = req.params;
+  
+  try {
+    // Ottieni info evento
+    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    
+    const evento = eventoResult.rows[0];
+    const [manifestazione, giorno] = evento.codice_gara.split('-');
+    const anno = new Date(evento.data_inizio).getFullYear();
+    
+    // Ottieni tutte le prove dell'evento
+    const proveResult = await pool.query(
+      'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
+      [id_evento]
+    );
+    
+    let aggiornate = 0;
+    let errori = 0;
+    const dettagli = [];
+    
+    // Per ogni prova, chiama FICR e aggiorna il nome
+    for (const prova of proveResult.rows) {
+      try {
+        // Determina la categoria dal nome evento (euristica)
+        let categoria = 1; // Default Campionato
+        if (evento.nome_evento.toLowerCase().includes('training')) {
+          categoria = 2;
+        } else if (evento.nome_evento.toLowerCase().includes('regolarità') || evento.nome_evento.toLowerCase().includes('epoca')) {
+          categoria = 3;
+        }
+        
+        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/107/${manifestazione}/${giorno}/${prova.numero_ordine}/${categoria}/*/*/*/*/*`;
+        const response = await axios.get(url);
+        
+        if (response.data?.data?.anagraficaps?.DescrProva) {
+          const nomeNuovo = response.data.data.anagraficaps.DescrProva;
+          
+          await pool.query(
+            'UPDATE prove_speciali SET nome_ps = $1 WHERE id = $2',
+            [nomeNuovo, prova.id]
+          );
+          
+          aggiornate++;
+          dettagli.push({
+            numero_ordine: prova.numero_ordine,
+            nome_vecchio: prova.nome_ps,
+            nome_nuovo: nomeNuovo
+          });
+        }
+      } catch (err) {
+        errori++;
+        console.error(`Errore prova ${prova.numero_ordine}:`, err.message);
+        dettagli.push({
+          numero_ordine: prova.numero_ordine,
+          errore: err.message
+        });
+      }
+    }
+    
+    res.json({
+      success: true,
+      totale_prove: proveResult.rows.length,
+      aggiornate: aggiornate,
+      errori: errori,
+      dettagli: dettagli,
+      message: `Aggiornate ${aggiornate} prove su ${proveResult.rows.length}`
+    });
+    
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== AGGIORNA CLASSE/MOTO ====================
 app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
