@@ -176,19 +176,15 @@ app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
   const { id_evento } = req.params;
   
   try {
-    // Ottieni info evento
     const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
     if (eventoResult.rows.length === 0) {
       return res.status(404).json({ error: 'Evento non trovato' });
     }
     
     const evento = eventoResult.rows[0];
-    
-    // Estrai parametri FICR dal codice_gara (formato: "manifestazione-giorno")
     const [manifestazione, giorno] = evento.codice_gara.split('-');
     const anno = new Date(evento.data_inizio).getFullYear();
     
-    // Ottieni tutti i piloti dell'evento
     const pilotiResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1',
       [id_evento]
@@ -197,7 +193,6 @@ app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
     let aggiornati = 0;
     let errori = 0;
     
-    // Per ogni pilota, cerca i suoi dati su FICR (usa prova 2 come riferimento)
     for (const pilota of pilotiResult.rows) {
       try {
         const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/107/${manifestazione}/${giorno}/2/1/*/*/*/*/*`;
@@ -278,20 +273,29 @@ app.get('/api/tempi/:id_ps', async (req, res) => {
       ORDER BY t.tempo_secondi ASC
     `, [id_ps]);
     
+    // Query migliorata: filtra solo chi ha fatto TUTTE le prove fino a questa
     const tempiCumulativi = await pool.query(`
+      WITH prove_fino_a_qui AS (
+        SELECT COUNT(*) as num_prove
+        FROM prove_speciali
+        WHERE id_evento = $1 
+          AND numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
+      )
       SELECT 
         p.numero_gara,
         p.nome,
         p.cognome,
         COALESCE(p.classe, '') as classe,
         COALESCE(p.moto, '') as moto,
-        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
+        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
+        COUNT(DISTINCT t.id_ps) as prove_fatte
       FROM piloti p
       JOIN tempi t ON p.id = t.id_pilota
       JOIN prove_speciali ps ON t.id_ps = ps.id
       WHERE p.id_evento = $1 
         AND ps.numero_ordine <= (SELECT numero_ordine FROM prove_speciali WHERE id = $2)
       GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
+      HAVING COUNT(DISTINCT t.id_ps) = (SELECT num_prove FROM prove_fino_a_qui)
       ORDER BY tempo_totale ASC
     `, [eventoId, id_ps]);
     
