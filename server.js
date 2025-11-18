@@ -69,17 +69,42 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
       categoria = 3;
     }
     
-    // 3. Chiama API FICR per ottenere programma prove
-    const urlProgram = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/107/${manifestazione}/${categoria}`;
-    const programResponse = await axios.get(urlProgram);
+    // 3. Determina equipe basandoti sulla manifestazione
+    // Vestenanova = 303 -> equipe 107
+    // Isola Vicentina = 11 -> equipe 99
+    let equipe = 107; // Default Veneto
+    if (manifestazione === '11') {
+      equipe = 99; // Treviso per Isola Vicentina
+    }
+    
+    // 4. Prova prima con mpcache-60, poi con mpcache-30
+    let programResponse = null;
+    let urlProgram = '';
+    
+    try {
+      urlProgram = `https://apienduro.ficr.it/END/mpcache-60/get/program/${anno}/${equipe}/${manifestazione}/${categoria}`;
+      programResponse = await axios.get(urlProgram);
+    } catch (err) {
+      try {
+        urlProgram = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manifestazione}/${categoria}`;
+        programResponse = await axios.get(urlProgram);
+      } catch (err2) {
+        return res.status(500).json({ 
+          error: 'Errore chiamata API FICR', 
+          url_tentato_60: `mpcache-60/.../${anno}/${equipe}/${manifestazione}/${categoria}`,
+          url_tentato_30: `mpcache-30/.../${anno}/${equipe}/${manifestazione}/${categoria}`,
+          errore: err2.message 
+        });
+      }
+    }
     
     if (!programResponse.data?.data || programResponse.data.data.length === 0) {
-      return res.status(404).json({ error: 'Nessuna prova trovata su FICR' });
+      return res.status(404).json({ error: 'Nessuna prova trovata su FICR', url_usato: urlProgram });
     }
     
     const proveFICR = programResponse.data.data; // Array ordinato delle prove
     
-    // 4. Recupera prove dal database (ordinate per numero_ordine)
+    // 5. Recupera prove dal database (ordinate per numero_ordine)
     const proveDBResult = await pool.query(
       'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine ASC',
       [id_evento]
@@ -91,7 +116,7 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
     
     const proveDB = proveDBResult.rows;
     
-    // 5. Aggiorna i nomi delle prove
+    // 6. Aggiorna i nomi delle prove
     let aggiornate = 0;
     const dettagli = [];
     
@@ -123,7 +148,8 @@ app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
       totale_prove_db: proveDB.length,
       aggiornate: aggiornate,
       dettagli: dettagli,
-      message: `Aggiornate ${aggiornate} prove con successo`
+      message: `Aggiornate ${aggiornate} prove con successo`,
+      url_usato: urlProgram
     });
     
   } catch (err) {
@@ -270,6 +296,12 @@ app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
     const [manifestazione, giorno] = evento.codice_gara.split('-');
     const anno = new Date(evento.data_inizio).getFullYear();
     
+    // Determina equipe
+    let equipe = 107;
+    if (manifestazione === '11') {
+      equipe = 99;
+    }
+    
     const pilotiResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1',
       [id_evento]
@@ -280,7 +312,7 @@ app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
     
     for (const pilota of pilotiResult.rows) {
       try {
-        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/107/${manifestazione}/${giorno}/2/1/*/*/*/*/*`;
+        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${equipe}/${manifestazione}/${giorno}/2/1/*/*/*/*/*`;
         const response = await axios.get(url);
         
         if (response.data?.data?.clasdella) {
