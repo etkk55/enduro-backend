@@ -272,7 +272,7 @@ app.post('/api/prove-speciali', async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato)
-       VALUES ($1, $2, $3, 'attiva')
+       VALUES ($1, $2, $3, 'non iniziata')
        RETURNING *`,
       [nome_ps, numero_ordine, id_evento]
     );
