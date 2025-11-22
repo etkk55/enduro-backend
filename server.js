@@ -716,7 +716,34 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
+// FIX TEMPORANEO - Crea prove Isola Vicentina
+app.get('/api/fix-prove-isola', async (req, res) => {
+  try {
+    const eventi = [
+      { id: '03406500-2c1e-4053-8580-ef4e9e5de0bf', nome: 'Campionato' },
+      { id: '8ef1e8a7-fc27-43f8-a3f2-d0694528a6e3', nome: 'Training' },
+      { id: '372c0c07-fdad-44be-9ba4-27a3de6bf69f', nome: 'Regolarità' }
+    ];
+    
+    const prove = [2, 3, 5, 6, 8, 9, 11, 12];
+    let createdCount = 0;
+    
+    for (const evento of eventi) {
+      for (let i = 0; i < prove.length; i++) {
+        await pool.query(
+          `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, distanza_km, tipo_prova, stato)
+           VALUES ($1, $2, $3, 0, 'enduro', 'non_iniziata')`,
+          [`Prova ${prove[i]}`, i + 1, evento.id]
+        );
+        createdCount++;
+      }
+    }
+    
+    res.json({ success: true, prove_create: createdCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
