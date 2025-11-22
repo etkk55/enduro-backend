@@ -1,1013 +1,494 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const axios = require('axios');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Database connection
+// Configurazione PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Test connessione database
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ Errore connessione database:', err);
+  } else {
+    console.log('✅ Database connesso:', res.rows[0].now);
+  }
+});
+
 // Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Enduro Events API',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Test database connection
-app.get('/api/test-db', async (req, res) => {
+// GET - Lista eventi
+app.get('/api/eventi', async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ success: true, time: result.rows[0].now });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== MIGRATION ====================
-app.get('/api/migrate', async (req, res) => {
-  try {
-    await pool.query(`
-      ALTER TABLE piloti 
-      ADD COLUMN IF NOT EXISTS classe VARCHAR(50),
-      ADD COLUMN IF NOT EXISTS moto VARCHAR(100)
+    const result = await pool.query(`
+      SELECT * FROM eventi 
+      WHERE stato = 'attivo'
+      ORDER BY data_inizio DESC
     `);
-    
-    res.json({ success: true, message: 'Colonne classe e moto aggiunte con successo' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Errore GET eventi:', error);
+    res.status(500).json({ error: 'Errore recupero eventi' });
   }
 });
 
-// ==================== AGGIORNA NOMI PROVE DA FICR ====================
-app.get('/api/aggiorna-nomi-prove/:id_evento', async (req, res) => {
-  const { id_evento } = req.params;
-  
+// GET - Singolo evento
+app.get('/api/eventi/:id', async (req, res) => {
   try {
-    // 1. Recupera info evento
-    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoResult.rows.length === 0) {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM eventi WHERE id = $1', [id]);
+    
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Evento non trovato' });
     }
     
-    const evento = eventoResult.rows[0];
-    const [manifestazione, giorno] = evento.codice_gara.split('-');
-    const anno = new Date(evento.data_inizio).getFullYear();
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Errore GET evento:', error);
+    res.status(500).json({ error: 'Errore recupero evento' });
+  }
+});
+
+// POST - Nuovo evento
+app.post('/api/eventi', async (req, res) => {
+  try {
+    const { nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione } = req.body;
     
-    // 2. Determina categoria
-    let categoria = 1; // Default: Campionato
-    if (evento.nome_evento.toLowerCase().includes('training')) {
-      categoria = 2;
-    } else if (evento.nome_evento.toLowerCase().includes('regolarità') || evento.nome_evento.toLowerCase().includes('epoca')) {
-      categoria = 3;
+    const result = await pool.query(`
+      INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione, stato)
+      VALUES ($1, $2, $3, $4, $5, $6, 'attivo')
+      RETURNING *
+    `, [nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione]);
+    
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Errore POST evento:', error);
+    res.status(500).json({ error: 'Errore creazione evento' });
+  }
+});
+
+// PUT - Aggiorna evento
+app.put('/api/eventi/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nome_evento, data_inizio, data_fine, luogo, descrizione } = req.body;
+    
+    const result = await pool.query(`
+      UPDATE eventi 
+      SET nome_evento = $1, data_inizio = $2, data_fine = $3, luogo = $4, descrizione = $5, updated_at = NOW()
+      WHERE id = $6
+      RETURNING *
+    `, [nome_evento, data_inizio, data_fine, luogo, descrizione, id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
     }
     
-    // 3. Determina equipe basandoti sulla manifestazione
-    // Vestenanova = 303 -> equipe 107
-    // Isola Vicentina = 11 -> equipe 99
-    let equipe = 107; // Default Veneto
-    if (manifestazione === '11') {
-      equipe = 99; // Treviso per Isola Vicentina
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Errore PUT evento:', error);
+    res.status(500).json({ error: 'Errore aggiornamento evento' });
+  }
+});
+
+// DELETE - Elimina evento (soft delete)
+app.delete('/api/eventi/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(`
+      UPDATE eventi 
+      SET stato = 'eliminato', updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `, [id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
     }
     
-    // 4. Prova prima con mpcache-60, poi con mpcache-30
-    let programResponse = null;
-    let urlProgram = '';
+    res.json({ message: 'Evento eliminato', evento: result.rows[0] });
+  } catch (error) {
+    console.error('Errore DELETE evento:', error);
+    res.status(500).json({ error: 'Errore eliminazione evento' });
+  }
+});
+
+// GET - Piloti di un evento
+app.get('/api/eventi/:id_evento/piloti', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM piloti 
+      WHERE id_evento = $1
+      ORDER BY numero
+    `, [id_evento]);
     
-    try {
-      urlProgram = `https://apienduro.ficr.it/END/mpcache-60/get/program/${anno}/${equipe}/${manifestazione}/${categoria}`;
-      programResponse = await axios.get(urlProgram);
-    } catch (err) {
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Errore GET piloti:', error);
+    res.status(500).json({ error: 'Errore recupero piloti' });
+  }
+});
+
+// POST - Import piloti da FICR
+app.post('/api/eventi/:id_evento/import-piloti', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id_evento } = req.params;
+    const { piloti } = req.body;
+    
+    if (!Array.isArray(piloti) || piloti.length === 0) {
+      return res.status(400).json({ error: 'Array piloti mancante o vuoto' });
+    }
+    
+    await client.query('BEGIN');
+    
+    let importati = 0;
+    let aggiornati = 0;
+    let errori = [];
+    
+    for (const pilota of piloti) {
       try {
-        urlProgram = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manifestazione}/${categoria}`;
-        programResponse = await axios.get(urlProgram);
-      } catch (err2) {
-        return res.status(500).json({ 
-          error: 'Errore chiamata API FICR', 
-          url_tentato_60: `mpcache-60/.../${anno}/${equipe}/${manifestazione}/${categoria}`,
-          url_tentato_30: `mpcache-30/.../${anno}/${equipe}/${manifestazione}/${categoria}`,
-          errore: err2.message 
+        const checkResult = await client.query(
+          'SELECT id FROM piloti WHERE id_evento = $1 AND numero = $2',
+          [id_evento, pilota.numero]
+        );
+        
+        if (checkResult.rows.length > 0) {
+          await client.query(`
+            UPDATE piloti 
+            SET cognome = $1, nome = $2, classe = $3, moto = $4, updated_at = NOW()
+            WHERE id = $5
+          `, [pilota.cognome, pilota.nome, pilota.classe, pilota.moto, checkResult.rows[0].id]);
+          aggiornati++;
+        } else {
+          await client.query(`
+            INSERT INTO piloti (id_evento, numero, cognome, nome, classe, moto)
+            VALUES ($1, $2, $3, $4, $5, $6)
+          `, [id_evento, pilota.numero, pilota.cognome, pilota.nome, pilota.classe, pilota.moto]);
+          importati++;
+        }
+      } catch (err) {
+        errori.push({ pilota: pilota.numero, errore: err.message });
+      }
+    }
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      success: true,
+      importati,
+      aggiornati,
+      errori: errori.length > 0 ? errori : undefined
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Errore import piloti:', error);
+    res.status(500).json({ error: 'Errore import piloti' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET - Prove speciali di un evento
+app.get('/api/eventi/:id_evento/prove', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    const result = await pool.query(`
+      SELECT * FROM prove_speciali 
+      WHERE id_evento = $1
+      ORDER BY numero_prova
+    `, [id_evento]);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Errore GET prove:', error);
+    res.status(500).json({ error: 'Errore recupero prove' });
+  }
+});
+
+// POST - Import prove da FICR
+app.post('/api/eventi/:id_evento/import-prove', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id_evento } = req.params;
+    const { prove } = req.body;
+    
+    if (!Array.isArray(prove) || prove.length === 0) {
+      return res.status(400).json({ error: 'Array prove mancante o vuoto' });
+    }
+    
+    await client.query('BEGIN');
+    
+    let importate = 0;
+    let aggiornate = 0;
+    
+    for (const prova of prove) {
+      const checkResult = await client.query(
+        'SELECT id FROM prove_speciali WHERE id_evento = $1 AND numero_prova = $2',
+        [id_evento, prova.numero_prova]
+      );
+      
+      if (checkResult.rows.length > 0) {
+        await client.query(`
+          UPDATE prove_speciali 
+          SET nome_prova = $1, updated_at = NOW()
+          WHERE id = $2
+        `, [prova.nome_prova, checkResult.rows[0].id]);
+        aggiornate++;
+      } else {
+        await client.query(`
+          INSERT INTO prove_speciali (id_evento, numero_prova, nome_prova)
+          VALUES ($1, $2, $3)
+        `, [id_evento, prova.numero_prova, prova.nome_prova]);
+        importate++;
+      }
+    }
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      success: true,
+      importate,
+      aggiornate
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Errore import prove:', error);
+    res.status(500).json({ error: 'Errore import prove' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST - Import tempi da FICR
+app.post('/api/eventi/:id_evento/import-tempi', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id_evento } = req.params;
+    const { tempi } = req.body;
+    
+    if (!Array.isArray(tempi) || tempi.length === 0) {
+      return res.status(400).json({ error: 'Array tempi mancante o vuoto' });
+    }
+    
+    await client.query('BEGIN');
+    
+    let importati = 0;
+    let aggiornati = 0;
+    let errori = [];
+    
+    for (const tempo of tempi) {
+      try {
+        const pilotaResult = await client.query(
+          'SELECT id FROM piloti WHERE id_evento = $1 AND numero = $2',
+          [id_evento, tempo.numero_pilota]
+        );
+        
+        if (pilotaResult.rows.length === 0) {
+          errori.push({ numero: tempo.numero_pilota, errore: 'Pilota non trovato' });
+          continue;
+        }
+        
+        const id_pilota = pilotaResult.rows[0].id;
+        
+        const provaResult = await client.query(
+          'SELECT id FROM prove_speciali WHERE id_evento = $1 AND numero_prova = $2',
+          [id_evento, tempo.numero_prova]
+        );
+        
+        if (provaResult.rows.length === 0) {
+          errori.push({ 
+            numero: tempo.numero_pilota, 
+            prova: tempo.numero_prova, 
+            errore: 'Prova non trovata' 
+          });
+          continue;
+        }
+        
+        const id_prova = provaResult.rows[0].id;
+        
+        const checkResult = await client.query(
+          'SELECT id FROM tempi WHERE id_pilota = $1 AND id_prova = $2',
+          [id_pilota, id_prova]
+        );
+        
+        if (checkResult.rows.length > 0) {
+          await client.query(`
+            UPDATE tempi 
+            SET tempo_secondi = $1, penalita = $2, ritirato = $3, updated_at = NOW()
+            WHERE id = $4
+          `, [tempo.tempo_secondi, tempo.penalita || 0, tempo.ritirato || false, checkResult.rows[0].id]);
+          aggiornati++;
+        } else {
+          await client.query(`
+            INSERT INTO tempi (id_pilota, id_prova, tempo_secondi, penalita, ritirato)
+            VALUES ($1, $2, $3, $4, $5)
+          `, [id_pilota, id_prova, tempo.tempo_secondi, tempo.penalita || 0, tempo.ritirato || false]);
+          importati++;
+        }
+      } catch (err) {
+        errori.push({ 
+          numero: tempo.numero_pilota, 
+          prova: tempo.numero_prova, 
+          errore: err.message 
         });
       }
     }
     
-    if (!programResponse.data?.data || programResponse.data.data.length === 0) {
-      return res.status(404).json({ error: 'Nessuna prova trovata su FICR', url_usato: urlProgram });
-    }
-    
-    const proveFICR = programResponse.data.data; // Array ordinato delle prove
-    
-    // 5. Recupera prove dal database (ordinate per numero_ordine)
-    const proveDBResult = await pool.query(
-      'SELECT * FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine ASC',
-      [id_evento]
-    );
-    
-    if (proveDBResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Nessuna prova trovata nel database per questo evento' });
-    }
-    
-    const proveDB = proveDBResult.rows;
-    
-    // 6. Aggiorna i nomi delle prove
-    let aggiornate = 0;
-    const dettagli = [];
-    
-    for (let i = 0; i < Math.min(proveFICR.length, proveDB.length); i++) {
-      const provaFICR = proveFICR[i];
-      const provaDB = proveDB[i];
-      
-      const nomeNuovo = `${provaFICR.Sigla} ${provaFICR.Description}`;
-      
-      await pool.query(
-        'UPDATE prove_speciali SET nome_ps = $1 WHERE id = $2',
-        [nomeNuovo, provaDB.id]
-      );
-      
-      aggiornate++;
-      dettagli.push({
-        posizione: i + 1,
-        numero_ordine_db: provaDB.numero_ordine,
-        nome_vecchio: provaDB.nome_ps,
-        nome_nuovo: nomeNuovo,
-        sigla: provaFICR.Sigla,
-        stage_number_ficr: provaFICR.StageNumber
-      });
-    }
+    await client.query('COMMIT');
     
     res.json({
       success: true,
-      totale_prove_ficr: proveFICR.length,
-      totale_prove_db: proveDB.length,
-      aggiornate: aggiornate,
-      dettagli: dettagli,
-      message: `Aggiornate ${aggiornate} prove con successo`,
-      url_usato: urlProgram
+      importati,
+      aggiornati,
+      errori: errori.length > 0 ? errori : undefined
     });
     
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Errore import tempi:', error);
+    res.status(500).json({ error: 'Errore import tempi' });
+  } finally {
+    client.release();
   }
 });
 
-// ==================== EVENTI ====================
-
-app.get('/api/eventi', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/eventi', async (req, res) => {
-  const { nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione } = req.body;
-  
-  try {
-    const result = await pool.query(
-      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione, stato)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'attivo')
-       RETURNING *`,
-      [nome_evento, codice_gara, data_inizio, data_fine, luogo, logo_url, descrizione]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/eventi/:id', async (req, res) => {
-  const { id } = req.params;
-  
-  try {
-    await pool.query('DELETE FROM tempi WHERE id_pilota IN (SELECT id FROM piloti WHERE id_evento = $1)', [id]);
-    await pool.query('DELETE FROM piloti WHERE id_evento = $1', [id]);
-    await pool.query('DELETE FROM prove_speciali WHERE id_evento = $1', [id]);
-    await pool.query('DELETE FROM eventi WHERE id = $1', [id]);
-    
-    res.json({ message: 'Evento eliminato con successo' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== PILOTI ====================
-
-app.get('/api/piloti', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT p.*, e.nome_evento 
-      FROM piloti p
-      LEFT JOIN eventi e ON p.id_evento = e.id
-      ORDER BY p.numero_gara
-    `);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/piloti', async (req, res) => {
-  const { numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe, moto } = req.body;
-  
-  try {
-    const result = await pool.query(
-      `INSERT INTO piloti (numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe, moto)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING *`,
-      [numero_gara, nome, cognome, id_categoria, team, nazione, email, telefono, id_evento, classe || '', moto || '']
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/piloti/:id', async (req, res) => {
-  const { id } = req.params;
-  
-  try {
-    await pool.query('DELETE FROM piloti WHERE id = $1', [id]);
-    res.json({ message: 'Pilota eliminato' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== PROVE SPECIALI ====================
-
-app.get('/api/prove-speciali', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        ps.id,
-        ps.nome_ps,
-        ps.numero_ordine,
-        ps.id_evento,
-        ps.stato,
-        ps.created_at,
-        e.nome_evento,
-        CONCAT(ps.nome_ps, ' - ', e.nome_evento) as nome_completo
-      FROM prove_speciali ps
-      LEFT JOIN eventi e ON ps.id_evento = e.id
-      ORDER BY e.nome_evento, ps.numero_ordine
-    `);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/prove-speciali', async (req, res) => {
-  const { nome_ps, numero_ordine, id_evento } = req.body;
-  
-  try {
-    const result = await pool.query(
-      `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato)
-       VALUES ($1, $2, $3, 'non_iniziata')
-       RETURNING *`,
-      [nome_ps, numero_ordine, id_evento]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== AGGIORNA CLASSE/MOTO ====================
-app.get('/api/aggiorna-classe-moto/:id_evento', async (req, res) => {
-  const { id_evento } = req.params;
-  
-  try {
-    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    
-    const evento = eventoResult.rows[0];
-    const [manifestazione, giorno] = evento.codice_gara.split('-');
-    const anno = new Date(evento.data_inizio).getFullYear();
-    
-    // Determina equipe
-    let equipe = 107;
-    if (manifestazione === '11') {
-      equipe = 99;
-    }
-    
-    const pilotiResult = await pool.query(
-      'SELECT * FROM piloti WHERE id_evento = $1',
-      [id_evento]
-    );
-    
-    let aggiornati = 0;
-    let errori = 0;
-    
-    for (const pilota of pilotiResult.rows) {
-      try {
-        const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${equipe}/${manifestazione}/${giorno}/2/1/*/*/*/*/*`;
-        const response = await axios.get(url);
-        
-        if (response.data?.data?.clasdella) {
-          const pilotaFICR = response.data.data.clasdella.find(
-            p => p.Numero === pilota.numero_gara
-          );
-          
-          if (pilotaFICR) {
-            await pool.query(
-              `UPDATE piloti 
-               SET classe = $1, moto = $2
-               WHERE id = $3`,
-              [
-                pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
-                pilotaFICR.Moto || '',
-                pilota.id
-              ]
-            );
-            aggiornati++;
-          }
-        }
-      } catch (err) {
-        errori++;
-        console.error(`Errore pilota ${pilota.numero_gara}:`, err.message);
-      }
-    }
-    
-    res.json({
-      success: true,
-      totale_piloti: pilotiResult.rows.length,
-      aggiornati: aggiornati,
-      errori: errori,
-      message: `Aggiornati ${aggiornati} piloti su ${pilotiResult.rows.length}`
-    });
-    
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== TEMPI ====================
-
-app.get('/api/tempi/:id_ps', async (req, res) => {
-  const { id_ps } = req.params;
-  
-  try {
-    const psInfo = await pool.query(`
-      SELECT ps.*, e.id as evento_id, e.nome_evento
-      FROM prove_speciali ps
-      JOIN eventi e ON ps.id_evento = e.id
-      WHERE ps.id = $1
-    `, [id_ps]);
-    
-    if (psInfo.rows.length === 0) {
-      return res.status(404).json({ error: 'Prova speciale non trovata' });
-    }
-    
-    const eventoId = psInfo.rows[0].evento_id;
-    const numeroOrdineCorrente = psInfo.rows[0].numero_ordine;
-    
-    // Classifica della prova
-    const tempiProva = await pool.query(`
-      SELECT 
-        t.id,
-        t.tempo_secondi,
-        t.penalita_secondi,
-        p.numero_gara,
-        p.nome,
-        p.cognome,
-        COALESCE(p.classe, '') as classe,
-        COALESCE(p.moto, '') as moto,
-        ps.nome_ps
-      FROM tempi t
-      JOIN piloti p ON t.id_pilota = p.id
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      WHERE t.id_ps = $1
-      ORDER BY t.tempo_secondi ASC
-    `, [id_ps]);
-    
-    // Classifica dopo la prova corrente (con filtro ritirati)
-    const tempiCumulativi = await pool.query(`
-      WITH prove_fino_a_qui AS (
-        SELECT COUNT(*) as num_prove
-        FROM prove_speciali
-        WHERE id_evento = $1 
-          AND numero_ordine <= $2
-      )
-      SELECT 
-        p.numero_gara,
-        p.nome,
-        p.cognome,
-        COALESCE(p.classe, '') as classe,
-        COALESCE(p.moto, '') as moto,
-        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
-        COUNT(DISTINCT t.id_ps) as prove_fatte
-      FROM piloti p
-      JOIN tempi t ON p.id = t.id_pilota
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      WHERE p.id_evento = $1 
-        AND ps.numero_ordine <= $2
-      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
-      HAVING COUNT(DISTINCT t.id_ps) = (SELECT num_prove FROM prove_fino_a_qui)
-      ORDER BY tempo_totale ASC
-    `, [eventoId, numeroOrdineCorrente]);
-    
-    // Classifica della prova PRECEDENTE (se esiste)
-    let tempiPrecedenti = [];
-    if (numeroOrdineCorrente > 1) {
-      tempiPrecedenti = await pool.query(`
-        WITH prove_fino_a_precedente AS (
-          SELECT COUNT(*) as num_prove
-          FROM prove_speciali
-          WHERE id_evento = $1 
-            AND numero_ordine < $2
-        )
-        SELECT 
-          p.numero_gara,
-          SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
-          ROW_NUMBER() OVER (ORDER BY SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) ASC) as posizione_precedente
-        FROM piloti p
-        JOIN tempi t ON p.id = t.id_pilota
-        JOIN prove_speciali ps ON t.id_ps = ps.id
-        WHERE p.id_evento = $1 
-          AND ps.numero_ordine < $2
-        GROUP BY p.id, p.numero_gara
-        HAVING COUNT(DISTINCT t.id_ps) = (SELECT num_prove FROM prove_fino_a_precedente)
-        ORDER BY tempo_totale ASC
-      `, [eventoId, numeroOrdineCorrente]);
-    }
-    
-    // Mappa posizioni precedenti
-    const posizioniPrecedenti = {};
-    tempiPrecedenti.rows.forEach(row => {
-      posizioniPrecedenti[row.numero_gara] = parseInt(row.posizione_precedente);
-    });
-    
-    // Conta totale piloti e ritirati
-    const totaliResult = await pool.query(`
-      SELECT 
-        COUNT(DISTINCT p.id) as totale_piloti,
-        COUNT(DISTINCT CASE 
-          WHEN (
-            SELECT COUNT(DISTINCT t2.id_ps) 
-            FROM tempi t2 
-            JOIN prove_speciali ps2 ON t2.id_ps = ps2.id 
-            WHERE t2.id_pilota = p.id AND ps2.numero_ordine <= $2
-          ) < (
-            SELECT COUNT(*) FROM prove_speciali WHERE id_evento = $1 AND numero_ordine <= $2
-          ) 
-          THEN p.id 
-        END) as ritirati
-      FROM piloti p
-      WHERE p.id_evento = $1
-        AND EXISTS (
-          SELECT 1 FROM tempi t 
-          JOIN prove_speciali ps ON t.id_ps = ps.id 
-          WHERE t.id_pilota = p.id AND ps.id_evento = $1
-        )
-    `, [eventoId, numeroOrdineCorrente]);
-    
-    const classificaDella = tempiProva.rows.map((row, index) => {
-      const minuti = Math.floor(row.tempo_secondi / 60);
-      const secondi = (row.tempo_secondi % 60).toFixed(2);
-      
-      let distacco = '';
-      if (index > 0) {
-        const diff = row.tempo_secondi - tempiProva.rows[0].tempo_secondi;
-        distacco = `+${diff.toFixed(2)}s`;
-      }
-      
-      return {
-        posizione: index + 1,
-        numero_gara: row.numero_gara,
-        pilota: `${row.nome} ${row.cognome}`,
-        classe: row.classe || '',
-        moto: row.moto || '',
-        tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
-        tempo_raw: row.tempo_secondi,
-        distacco: distacco
-      };
-    });
-    
-    const classificaDopo = tempiCumulativi.rows.map((row, index) => {
-      const minuti = Math.floor(row.tempo_totale / 60);
-      const secondi = (row.tempo_totale % 60).toFixed(2);
-      
-      let distacco = '';
-      if (index > 0) {
-        const diff = row.tempo_totale - tempiCumulativi.rows[0].tempo_totale;
-        const diffMin = Math.floor(diff / 60);
-        const diffSec = (diff % 60).toFixed(2);
-        distacco = `+${diffMin}'${diffSec.padStart(5, '0')}"`;
-      }
-      
-      const posizioneAttuale = index + 1;
-      const posizionePrecedente = posizioniPrecedenti[row.numero_gara];
-      
-      let variazione = null;
-      if (posizionePrecedente) {
-        const diff = posizionePrecedente - posizioneAttuale;
-        if (diff > 0) {
-          variazione = { tipo: 'up', valore: diff };
-        } else if (diff < 0) {
-          variazione = { tipo: 'down', valore: Math.abs(diff) };
-        } else {
-          variazione = { tipo: 'same', valore: 0 };
-        }
-      }
-      
-      return {
-        posizione: posizioneAttuale,
-        numero_gara: row.numero_gara,
-        pilota: `${row.nome} ${row.cognome}`,
-        classe: row.classe || '',
-        moto: row.moto || '',
-        tempo: `${minuti}'${secondi.padStart(5, '0')}"`,
-        tempo_raw: row.tempo_totale,
-        distacco: distacco,
-        variazione: variazione
-      };
-    });
-    
-    res.json({
-      prova_info: psInfo.rows[0],
-      classifica_della: classificaDella,
-      classifica_dopo: classificaDopo,
-      statistiche: {
-        piloti_classificati: tempiCumulativi.rows.length,
-        ritirati: totaliResult.rows[0].ritirati,
-        totale_piloti: totaliResult.rows[0].totale_piloti
-      }
-    });
-    
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/tempi', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        t.id,
-        t.tempo_secondi,
-        t.penalita_secondi,
-        p.numero_gara,
-        p.nome,
-        p.cognome,
-        ps.nome_ps,
-        ps.numero_ordine,
-        e.nome_evento,
-        t.id_pilota,
-        t.id_ps
-      FROM tempi t
-      JOIN piloti p ON t.id_pilota = p.id
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      JOIN eventi e ON ps.id_evento = e.id
-      ORDER BY ps.numero_ordine, t.tempo_secondi
-    `);
-    
-    const tempiFormattati = result.rows.map(row => {
-      const minuti = Math.floor(row.tempo_secondi / 60);
-      const secondi = (row.tempo_secondi % 60).toFixed(2);
-      
-      return {
-        ...row,
-        tempo_formattato: `${minuti}'${secondi.padStart(5, '0')}`,
-        tempo_secondi_raw: row.tempo_secondi
-      };
-    });
-    
-    res.json(tempiFormattati);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/tempi', async (req, res) => {
-  const { id_pilota, id_ps, tempo_secondi, penalita_secondi } = req.body;
-  
-  try {
-    const result = await pool.query(
-      `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [id_pilota, id_ps, tempo_secondi, penalita_secondi || 0]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/tempi/:id', async (req, res) => {
-  const { id } = req.params;
-  const { tempo_secondi, penalita_secondi } = req.body;
-  
-  try {
-    const result = await pool.query(
-      `UPDATE tempi 
-       SET tempo_secondi = $1, penalita_secondi = $2
-       WHERE id = $3
-       RETURNING *`,
-      [tempo_secondi, penalita_secondi, id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== CLASSIFICHE ====================
-
-app.get('/api/classifiche/:id_evento', async (req, res) => {
-  const { id_evento } = req.params;
-  
-  try {
-    const result = await pool.query(`
-      WITH prove_evento AS (
-        SELECT COUNT(*) as totale_prove
-        FROM prove_speciali
-        WHERE id_evento = $1
-      )
-      SELECT 
-        p.numero_gara,
-        p.nome,
-        p.cognome,
-        COALESCE(p.classe, '') as classe,
-        COALESCE(p.moto, '') as moto,
-        COALESCE(p.team, '') as team,
-        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale,
-        COUNT(DISTINCT t.id_ps) as prove_completate,
-        (SELECT totale_prove FROM prove_evento) as totale_prove_evento
-      FROM piloti p
-      JOIN tempi t ON p.id = t.id_pilota
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      WHERE p.id_evento = $1 AND ps.id_evento = $1
-      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto, p.team
-      HAVING COUNT(DISTINCT t.id_ps) = (SELECT totale_prove FROM prove_evento)
-      ORDER BY tempo_totale ASC
-    `, [id_evento]);
-    
-    const classificaFormattata = result.rows.map((row, index) => {
-      const minuti = Math.floor(row.tempo_totale / 60);
-      const secondi = (row.tempo_totale % 60).toFixed(2);
-      
-      let distacco = '';
-      if (index > 0) {
-        const diff = row.tempo_totale - result.rows[0].tempo_totale;
-        const diffMinuti = Math.floor(diff / 60);
-        const diffSecondi = (diff % 60).toFixed(2);
-        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}"`;
-      }
-      
-      return {
-        posizione: index + 1,
-        numero_gara: row.numero_gara,
-        pilota: `${row.nome} ${row.cognome}`,
-        classe: row.classe || '',
-        moto: row.moto || '',
-        team: row.team || '',
-        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}"`,
-        tempo_totale_raw: row.tempo_totale,
-        distacco: distacco,
-        prove_completate: row.prove_completate,
-        totale_prove: row.totale_prove_evento
-      };
-    });
-    
-    res.json(classificaFormattata);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/classifiche', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        p.numero_gara,
-        p.nome,
-        p.cognome,
-        e.nome_evento,
-        SUM(t.tempo_secondi + COALESCE(t.penalita_secondi, 0)) as tempo_totale
-      FROM piloti p
-      JOIN tempi t ON p.id = t.id_pilota
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      JOIN eventi e ON p.id_evento = e.id
-      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, e.nome_evento
-      ORDER BY tempo_totale ASC
-    `);
-    
-    const classificaFormattata = result.rows.map((row, index) => {
-      const minuti = Math.floor(row.tempo_totale / 60);
-      const secondi = (row.tempo_totale % 60).toFixed(2);
-      
-      let distacco = '';
-      if (index > 0) {
-        const diff = row.tempo_totale - result.rows[0].tempo_totale;
-        const diffMinuti = Math.floor(diff / 60);
-        const diffSecondi = (diff % 60).toFixed(2);
-        distacco = `${diffMinuti}'${diffSecondi.padStart(5, '0')}"`;
-      }
-      
-      return {
-        posizione: index + 1,
-        numero_gara: row.numero_gara,
-        pilota: `${row.nome} ${row.cognome}`,
-        evento: row.nome_evento,
-        tempo_totale: `${minuti}'${secondi.padStart(5, '0')}"`,
-        tempo_totale_raw: row.tempo_totale,
-        distacco: distacco
-      };
-    });
-    
-    res.json(classificaFormattata);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== IMPORT FICR ====================
-
-function convertiTempoFICR(tempoStr) {
-  if (!tempoStr || tempoStr === '') return null;
-  
-  const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
-  if (!match) return null;
-  
-  const minuti = parseInt(match[1]);
-  const secondi = parseFloat(match[2]);
-  
-  return minuti * 60 + secondi;
-}
-
-app.post('/api/import-ficr', async (req, res) => {
-  const { anno, codiceEquipe, manifestazione, giorno, prova, categoria, id_evento, id_ps } = req.body;
-  
-  try {
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
-    const response = await axios.get(url);
-    
-    if (!response.data || !response.data.data || !response.data.data.clasdella) {
-      return res.status(404).json({ error: 'Dati non trovati su FICR' });
-    }
-    
-    const piloti = response.data.data.clasdella;
-    
-    let pilotiImportati = 0;
-    let pilotiAggiornati = 0;
-    let tempiImportati = 0;
-    
-    for (const pilotaFICR of piloti) {
-      let pilotaId;
-      const pilotaEsistente = await pool.query(
-        'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
-        [pilotaFICR.Numero, id_evento]
-      );
-      
-      if (pilotaEsistente.rows.length > 0) {
-        pilotaId = pilotaEsistente.rows[0].id;
-        
-        await pool.query(
-          `UPDATE piloti 
-           SET classe = COALESCE(NULLIF(classe, ''), $1),
-               moto = COALESCE(NULLIF(moto, ''), $2)
-           WHERE id = $3`,
-          [
-            pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
-            pilotaFICR.Moto || '',
-            pilotaId
-          ]
-        );
-        pilotiAggiornati++;
-      } else {
-        const nuovoPilota = await pool.query(
-          `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento, classe, moto)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id`,
-          [
-            pilotaFICR.Numero,
-            pilotaFICR.Nome,
-            pilotaFICR.Cognome,
-            pilotaFICR.Motoclub || '',
-            pilotaFICR.Naz || '',
-            id_evento,
-            pilotaFICR.Classe || pilotaFICR.ClasseDescr || '',
-            pilotaFICR.Moto || ''
-          ]
-        );
-        pilotaId = nuovoPilota.rows[0].id;
-        pilotiImportati++;
-      }
-      
-      const tempoSecondi = convertiTempoFICR(pilotaFICR.Tempo);
-      if (tempoSecondi !== null) {
-        await pool.query(
-          `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-           VALUES ($1, $2, $3, 0)
-           ON CONFLICT DO NOTHING`,
-          [pilotaId, id_ps, tempoSecondi]
-        );
-        tempiImportati++;
-      }
-    }
-    
-    res.json({ 
-      success: true, 
-      pilotiImportati, 
-      pilotiAggiornati,
-      tempiImportati,
-      totale: piloti.length
-    });
-    
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== CATEGORIE ====================
-
-app.get('/api/categorie', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM categorie ORDER BY nome_categoria');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==================== EXPORT REPLAY PER LIVE TIMING ====================
+// GET - Export replay per Live Timing
 app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
-  const { id_evento } = req.params;
-  
   try {
-    // 1. Verifica evento
-    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    const { id_evento } = req.params;
+    
+    // Verifica evento
+    const eventoResult = await pool.query('SELECT nome_evento FROM eventi WHERE id = $1', [id_evento]);
     if (eventoResult.rows.length === 0) {
       return res.status(404).json({ error: 'Evento non trovato' });
     }
-    const evento = eventoResult.rows[0];
     
-    // 2. Recupera piloti
+    // Carica piloti
     const pilotiResult = await pool.query(`
-      SELECT id, numero_gara, nome, cognome, classe, moto
+      SELECT id, numero, cognome, nome, classe, moto
       FROM piloti 
       WHERE id_evento = $1
-      ORDER BY numero_gara
+      ORDER BY numero
     `, [id_evento]);
     
-    // 3. Recupera prove speciali
+    // Carica prove
     const proveResult = await pool.query(`
-      SELECT id, nome_ps, numero_ordine
+      SELECT id, numero_prova, nome_prova
       FROM prove_speciali
       WHERE id_evento = $1
-      ORDER BY numero_ordine
+      ORDER BY numero_prova
     `, [id_evento]);
     
-    // 4. Recupera tutti i tempi
+    // Carica tempi
     const tempiResult = await pool.query(`
-      SELECT 
-        t.id_pilota,
-        t.id_ps,
-        t.tempo_secondi,
-        t.penalita_secondi,
-        ps.numero_ordine as ps_numero
+      SELECT t.*, p.numero as numero_pilota, ps.numero_prova
       FROM tempi t
-      JOIN prove_speciali ps ON t.id_ps = ps.id
-      WHERE ps.id_evento = $1
-      ORDER BY ps.numero_ordine, t.tempo_secondi
+      JOIN piloti p ON t.id_pilota = p.id
+      JOIN prove_speciali ps ON t.id_prova = ps.id
+      WHERE p.id_evento = $1 AND ps.id_evento = $1
+      ORDER BY ps.numero_prova, p.numero
     `, [id_evento]);
     
-    // 5. Costruisci struttura replay
-    const piloti = pilotiResult.rows.map(p => ({
-      num: p.numero_gara,
-      cognome: p.cognome,
-      nome: p.nome,
-      classe: p.classe || 'N/A',
-      moto: p.moto || 'N/A',
-      id: p.id
-    }));
+    // Costruisci mappa piloti
+    const pilotiMap = {};
+    pilotiResult.rows.forEach(p => {
+      pilotiMap[p.id] = {
+        num: p.numero,
+        cognome: p.cognome,
+        nome: p.nome,
+        classe: p.classe,
+        moto: p.moto,
+        id: p.id
+      };
+    });
     
-    const prove = proveResult.rows.map(p => ({
-      id: p.numero_ordine,
-      nome: p.nome_ps
-    }));
+    // Costruisci mappa prove
+    const proveMap = {};
+    proveResult.rows.forEach(pr => {
+      proveMap[pr.id] = pr.numero_prova;
+    });
     
-    // 6. Costruisci snapshots per ogni prova
+    // Costruisci snapshots
     const snapshots = [];
-    const numProve = prove.length;
+    const prove = proveResult.rows.sort((a, b) => a.numero_prova - b.numero_prova);
     
-    for (let psNum = 1; psNum <= numProve; psNum++) {
-      const prova = proveResult.rows.find(p => p.numero_ordine === psNum);
-      if (!prova) continue;
+    for (let i = 0; i < prove.length; i++) {
+      const provaCorrente = prove[i];
+      const proveFinoAd = prove.slice(0, i + 1);
       
-      // Calcola classifica dopo questa prova
-      const classificaParziale = [];
+      // Calcola classifica cumulativa
+      const classificaPiloti = {};
       
-      for (const pilota of pilotiResult.rows) {
-        // Somma tempi fino a questa prova
-        let tempoTotale = 0;
-        const tempiPS = {};
-        
-        for (let i = 1; i <= psNum; i++) {
-          const provaI = proveResult.rows.find(p => p.numero_ordine === i);
-          if (!provaI) continue;
-          
-          const tempo = tempiResult.rows.find(t => 
-            t.id_pilota === pilota.id && t.ps_numero === i
-          );
-          
-          if (tempo) {
-            const tempoConPenalita = parseFloat(tempo.tempo_secondi) + parseFloat(tempo.penalita_secondi || 0);
-            tempoTotale += tempoConPenalita;
-            tempiPS[`ps${i}`] = tempoConPenalita;
-            tempiPS[`ps${i}_time`] = `${Math.floor(tempoConPenalita / 60)}:${(tempoConPenalita % 60).toFixed(2).padStart(5, '0')}`;
-          }
-        }
-        
-        if (tempoTotale > 0) {
-          classificaParziale.push({
-            id_pilota: pilota.id,
-            num: pilota.numero_gara,
-            cognome: pilota.cognome,
-            nome: pilota.nome,
-            classe: pilota.classe || 'N/A',
-            tempo_totale_sec: tempoTotale,
-            tempi_ps: tempiPS
-          });
-        }
-      }
-      
-      // Ordina per tempo totale
-      classificaParziale.sort((a, b) => a.tempo_totale_sec - b.tempo_totale_sec);
-      
-      // Calcola posizioni e distacchi
-      const classifica = classificaParziale.map((p, idx) => {
-        const pos = idx + 1;
-        const tempoTotale = p.tempo_totale_sec;
-        const minutes = Math.floor(tempoTotale / 60);
-        const seconds = tempoTotale % 60;
-        
-        // Distacchi per ogni PS
-        const psData = {};
-        for (let i = 1; i <= psNum; i++) {
-          if (idx === 0) {
-            psData[`ps${i}`] = '0.0';
-          } else {
-            const prevTempo = classificaParziale[idx - 1].tempo_totale_sec;
-            const gap = tempoTotale - prevTempo;
-            psData[`ps${i}`] = `+${gap.toFixed(1)}`;
-          }
-          psData[`ps${i}_time`] = p.tempi_ps[`ps${i}_time`] || null;
-        }
-        
-        // PS non ancora corse
-        for (let i = psNum + 1; i <= numProve; i++) {
-          psData[`ps${i}`] = null;
-          psData[`ps${i}_time`] = null;
-        }
-        
-        return {
-          pos,
-          num: p.num,
-          cognome: p.cognome,
-          nome: p.nome,
-          classe: p.classe,
-          ...psData,
-          totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
-          var: 0 // Calcolo variazioni richiederebbe snapshot precedente
+      pilotiResult.rows.forEach(pilota => {
+        classificaPiloti[pilota.id] = {
+          pos: 0,
+          num: pilota.numero,
+          cognome: pilota.cognome,
+          nome: pilota.nome,
+          classe: pilota.classe,
+          totale_secondi: 0,
+          tempi_prove: {}
         };
       });
       
-      snapshots.push({
-        step: psNum,
-        descrizione: `Dopo ${prove[psNum - 1].nome}`,
-        prova_corrente: psNum,
-        classifica
+      // Accumula tempi
+      tempiResult.rows.forEach(tempo => {
+        const numProva = proveMap[tempo.id_prova];
+        if (numProva <= provaCorrente.numero_prova) {
+          if (classificaPiloti[tempo.id_pilota]) {
+            classificaPiloti[tempo.id_pilota].totale_secondi += tempo.tempo_secondi;
+            classificaPiloti[tempo.id_pilota].tempi_prove[`ps${i + 1}`] = tempo.tempo_secondi;
+          }
+        }
       });
-    }
-    
-    // 7. Ritorna JSON
-    res.json({
-      manifestazione: evento.nome_evento,
-      prove,
-      piloti,
-      snapshots
-    });
-    
-  } catch (err) {
-    console.error('Errore export replay:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+      
+      // Ordina per tempo totale
+      const classificaArray = Object.values(classificaPiloti)
+        .filter(p => p.totale_secondi > 0)
+        .sort((a, b) => a.totale_secondi - b.totale_secondi);
+      
+      // Assegna posizioni e calcola variazioni
+      const leader = classificaArray[0];
+      const leaderTime = leader ? leader.totale_secondi : 0;
+      
+      classificaArray.forEach((pilota, idx) => {
+        pilota.pos = idx + 1;
+        const gap = pilota.totale_secondi - leaderTime;
+        pilota.totale = formatTempo(pilota.totale_secondi);
+        pilota.var = gap > 0 ? Math.round(gap * 10) / 10 : 0;
+        
+        // Formatta tempi prove
+        for (let j = 1; j <= i + 1; j++) {
+          const tempoProva = pilota.tempi_prove[`ps${j}`];
+          if (tempoProva) {
+            pilota[`ps${j}`] = gap > 0 ? `+${(gap / 10).toFixed(1)}` : "0.0";
+            pilota[`ps${j}_time`] = formatTempo(tempoProva);
+          } else {
+            pilota[`ps${j}`] = null;
+            pilota[`ps${j}_time`] = null;
+          }
