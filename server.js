@@ -731,14 +731,14 @@ app.get('/api/fix-prove-isola', async (req, res) => {
     for (const evento of eventi) {
       for (let i = 0; i < prove.length; i++) {
         await pool.query(
-          `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, distanza_km, tipo_prova, stato)
-           VALUES ($1, $2, $3, 0, 'enduro', 'non_iniziata')`,
+          `INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato)
+          VALUES ($1, $2, $3, 'non_iniziata')`,
           [`Prova ${prove[i]}`, i + 1, evento.id]
         );
         createdCount++;
       }
     }
-    
+
     res.json({ success: true, prove_create: createdCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
