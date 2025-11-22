@@ -843,6 +843,171 @@ app.get('/api/categorie', async (req, res) => {
   }
 });
 
+// ==================== EXPORT REPLAY PER LIVE TIMING ====================
+app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
+  const { id_evento } = req.params;
+  
+  try {
+    // 1. Verifica evento
+    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    const evento = eventoResult.rows[0];
+    
+    // 2. Recupera piloti
+    const pilotiResult = await pool.query(`
+      SELECT id, numero_gara, nome, cognome, classe, moto
+      FROM piloti 
+      WHERE id_evento = $1
+      ORDER BY numero_gara
+    `, [id_evento]);
+    
+    // 3. Recupera prove speciali
+    const proveResult = await pool.query(`
+      SELECT id, nome_ps, numero_ordine
+      FROM prove_speciali
+      WHERE id_evento = $1
+      ORDER BY numero_ordine
+    `, [id_evento]);
+    
+    // 4. Recupera tutti i tempi
+    const tempiResult = await pool.query(`
+      SELECT 
+        t.id_pilota,
+        t.id_ps,
+        t.tempo_secondi,
+        t.penalita_secondi,
+        ps.numero_ordine as ps_numero
+      FROM tempi t
+      JOIN prove_speciali ps ON t.id_ps = ps.id
+      WHERE ps.id_evento = $1
+      ORDER BY ps.numero_ordine, t.tempo_secondi
+    `, [id_evento]);
+    
+    // 5. Costruisci struttura replay
+    const piloti = pilotiResult.rows.map(p => ({
+      num: p.numero_gara,
+      cognome: p.cognome,
+      nome: p.nome,
+      classe: p.classe || 'N/A',
+      moto: p.moto || 'N/A',
+      id: p.id
+    }));
+    
+    const prove = proveResult.rows.map(p => ({
+      id: p.numero_ordine,
+      nome: p.nome_ps
+    }));
+    
+    // 6. Costruisci snapshots per ogni prova
+    const snapshots = [];
+    const numProve = prove.length;
+    
+    for (let psNum = 1; psNum <= numProve; psNum++) {
+      const prova = proveResult.rows.find(p => p.numero_ordine === psNum);
+      if (!prova) continue;
+      
+      // Calcola classifica dopo questa prova
+      const classificaParziale = [];
+      
+      for (const pilota of pilotiResult.rows) {
+        // Somma tempi fino a questa prova
+        let tempoTotale = 0;
+        const tempiPS = {};
+        
+        for (let i = 1; i <= psNum; i++) {
+          const provaI = proveResult.rows.find(p => p.numero_ordine === i);
+          if (!provaI) continue;
+          
+          const tempo = tempiResult.rows.find(t => 
+            t.id_pilota === pilota.id && t.ps_numero === i
+          );
+          
+          if (tempo) {
+            const tempoConPenalita = parseFloat(tempo.tempo_secondi) + parseFloat(tempo.penalita_secondi || 0);
+            tempoTotale += tempoConPenalita;
+            tempiPS[`ps${i}`] = tempoConPenalita;
+            tempiPS[`ps${i}_time`] = `${Math.floor(tempoConPenalita / 60)}:${(tempoConPenalita % 60).toFixed(2).padStart(5, '0')}`;
+          }
+        }
+        
+        if (tempoTotale > 0) {
+          classificaParziale.push({
+            id_pilota: pilota.id,
+            num: pilota.numero_gara,
+            cognome: pilota.cognome,
+            nome: pilota.nome,
+            classe: pilota.classe || 'N/A',
+            tempo_totale_sec: tempoTotale,
+            tempi_ps: tempiPS
+          });
+        }
+      }
+      
+      // Ordina per tempo totale
+      classificaParziale.sort((a, b) => a.tempo_totale_sec - b.tempo_totale_sec);
+      
+      // Calcola posizioni e distacchi
+      const classifica = classificaParziale.map((p, idx) => {
+        const pos = idx + 1;
+        const tempoTotale = p.tempo_totale_sec;
+        const minutes = Math.floor(tempoTotale / 60);
+        const seconds = tempoTotale % 60;
+        
+        // Distacchi per ogni PS
+        const psData = {};
+        for (let i = 1; i <= psNum; i++) {
+          if (idx === 0) {
+            psData[`ps${i}`] = '0.0';
+          } else {
+            const prevTempo = classificaParziale[idx - 1].tempo_totale_sec;
+            const gap = tempoTotale - prevTempo;
+            psData[`ps${i}`] = `+${gap.toFixed(1)}`;
+          }
+          psData[`ps${i}_time`] = p.tempi_ps[`ps${i}_time`] || null;
+        }
+        
+        // PS non ancora corse
+        for (let i = psNum + 1; i <= numProve; i++) {
+          psData[`ps${i}`] = null;
+          psData[`ps${i}_time`] = null;
+        }
+        
+        return {
+          pos,
+          num: p.num,
+          cognome: p.cognome,
+          nome: p.nome,
+          classe: p.classe,
+          ...psData,
+          totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
+          var: 0 // Calcolo variazioni richiederebbe snapshot precedente
+        };
+      });
+      
+      snapshots.push({
+        step: psNum,
+        descrizione: `Dopo ${prove[psNum - 1].nome}`,
+        prova_corrente: psNum,
+        classifica
+      });
+    }
+    
+    // 7. Ritorna JSON
+    res.json({
+      manifestazione: evento.nome_evento,
+      prove,
+      piloti,
+      snapshots
+    });
+    
+  } catch (err) {
+    console.error('Errore export replay:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
