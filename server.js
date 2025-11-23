@@ -613,7 +613,11 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
       }
       tempiPerPilota[t.id_pilota][`ps${t.numero_ordine}`] = t.tempo_secondi;
     });
-    
+console.log('=== DEBUG TEMPI ===');
+console.log('Totale piloti con tempi:', Object.keys(tempiPerPilota).length);
+const primoPilota = Object.keys(tempiPerPilota)[0];
+console.log('Primo pilota ID:', primoPilota);
+console.log('Tempi primo pilota:', tempiPerPilota[primoPilota]);    
     // 6. Genera snapshots progressivi
     const snapshots = [];
     const numProve = proveResult.rows.length;
