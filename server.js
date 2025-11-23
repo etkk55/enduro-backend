@@ -632,7 +632,7 @@ console.log('Tempi primo pilota:', tempiPerPilota[primoPilota]);
           for (let i = 1; i <= psNum; i++) {
             const tempo = tempiPerPilota[p.id]?.[`ps${i}`];
             if (tempo) {
-              tempoTotale += tempo;
+tempoTotale += parseFloat(tempo);
               tempi_ps[`ps${i}`] = tempo;
               tempi_ps[`ps${i}_time`] = tempo;
             }
