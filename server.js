@@ -744,6 +744,87 @@ app.get('/api/fix-prove-isola', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// IMPORT TEMPI ISOLA VICENTINA
+app.get('/api/import-tempi-isola-campionato', async (req, res) => {
+  const ID_EVENTO = '03406500-2c1e-4053-8580-ef4e9e5de0bf';
+  const prove = [2, 3, 5, 6, 8, 9, 11, 12];
+  
+  try {
+    let totaleImportati = 0;
+    
+    for (const numeroProva of prove) {
+      // Trova ID prova nel DB
+      const provaResult = await pool.query(
+        'SELECT id FROM prove_speciali WHERE id_evento = $1 AND nome_ps = $2',
+        [ID_EVENTO, `Prova ${numeroProva}`]
+      );
+      
+      if (provaResult.rows.length === 0) continue;
+      const id_ps = provaResult.rows[0].id;
+      
+      // Import da FICR
+      const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/2025/99/11/1/${numeroProva}/1/*/*/*/*/*`;
+      const response = await axios.get(url);
+      
+      if (!response.data?.data?.clasdella) continue;
+      
+      const piloti = response.data.data.clasdella;
+      
+      for (const pilotaFICR of piloti) {
+        // Trova pilota
+        const pilotaResult = await pool.query(
+          'SELECT id FROM piloti WHERE numero_gara = $1 AND id_evento = $2',
+          [pilotaFICR.Numero, ID_EVENTO]
+        );
+        
+        let pilotaId;
+        if (pilotaResult.rows.length > 0) {
+          pilotaId = pilotaResult.rows[0].id;
+        } else {
+          // Crea pilota
+          const nuovoPilota = await pool.query(
+            `INSERT INTO piloti (numero_gara, nome, cognome, team, nazione, id_evento, classe, moto)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            [
+              pilotaFICR.Numero,
+              pilotaFICR.Nome,
+              pilotaFICR.Cognome,
+              pilotaFICR.Motoclub || '',
+              pilotaFICR.Naz || '',
+              ID_EVENTO,
+              pilotaFICR.Classe || '',
+              pilotaFICR.Moto || ''
+            ]
+          );
+          pilotaId = nuovoPilota.rows[0].id;
+        }
+        
+        // Converti tempo
+        const tempoStr = pilotaFICR.Tempo;
+        if (!tempoStr) continue;
+        
+        const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
+        if (!match) continue;
+        
+        const tempoSecondi = parseInt(match[1]) * 60 + parseFloat(match[2]);
+        
+        // Inserisci tempo
+        await pool.query(
+          `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+           VALUES ($1, $2, $3, 0)
+           ON CONFLICT (id_pilota, id_ps) DO UPDATE SET tempo_secondi = $3`,
+          [pilotaId, id_ps, tempoSecondi]
+        );
+        
+        totaleImportati++;
+      }
+    }
+    
+    res.json({ success: true, tempi_importati: totaleImportati });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
