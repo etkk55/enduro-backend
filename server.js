@@ -836,6 +836,123 @@ app.get('/api/import-tempi-isola/:tipo_gara', async (req, res) => {
   }
 });
 
+// ==================== NUOVO: LISTA MANIFESTAZIONI FICR ====================
+app.get('/api/ficr/manifestazioni', async (req, res) => {
+  try {
+    const anno = req.query.anno || new Date().getFullYear();
+    
+    const url = `https://apienduro.ficr.it/END/mpcache-30/get/schedule/${anno}/*/*`;
+    const response = await axios.get(url);
+    
+    // Ritorna dati grezzi da FICR
+    res.json(response.data);
+    
+  } catch (err) {
+    res.status(500).json({ error: 'Errore chiamata API FICR: ' + err.message });
+  }
+});
+
+// ==================== NUOVO: IMPORT FICR GENERICO ====================
+app.post('/api/import-ficr', async (req, res) => {
+  try {
+    const { 
+      anno, 
+      codiceEquipe, 
+      manifestazione, 
+      giorno, 
+      prova, 
+      categoria, 
+      id_evento, 
+      id_ps 
+    } = req.body;
+
+    // Validazione parametri
+    if (!anno || !codiceEquipe || !manifestazione || !giorno || !prova || !categoria || !id_evento || !id_ps) {
+      return res.status(400).json({ error: 'Parametri mancanti' });
+    }
+
+    // 1. Chiamata API FICR
+    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
+    
+    console.log(`[IMPORT] Chiamata FICR: ${url}`);
+    
+    const response = await axios.get(url);
+    const dati = response.data;
+
+    if (!dati || !Array.isArray(dati) || dati.length === 0) {
+      return res.status(404).json({ error: 'Nessun dato trovato da FICR' });
+    }
+
+    let pilotiImportati = 0;
+    let tempiImportati = 0;
+
+    // 2. Importa piloti e tempi
+    for (const record of dati) {
+      try {
+        const numeroGara = parseInt(record.NumeroGara);
+        const cognome = record.Cognome || '';
+        const nome = record.Nome || '';
+        const classe = record.Classe || '';
+        const moto = record.Moto || '';
+        const team = record.Team || '';
+        const nazione = record.Nazione || 'ITA';
+
+        // Verifica se pilota esiste
+        let pilotaResult = await pool.query(
+          'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+          [id_evento, numeroGara]
+        );
+
+        let pilotaId;
+        if (pilotaResult.rows.length === 0) {
+          // Crea pilota
+          const insertResult = await pool.query(
+            `INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, nazione)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id`,
+            [id_evento, numeroGara, cognome, nome, classe, moto, team, nazione]
+          );
+          pilotaId = insertResult.rows[0].id;
+          pilotiImportati++;
+        } else {
+          pilotaId = pilotaResult.rows[0].id;
+        }
+
+        // Importa tempo se presente
+        const tempoStr = record.Tempo;
+        if (tempoStr && tempoStr.includes("'")) {
+          const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
+          if (match) {
+            const tempoSecondi = parseInt(match[1]) * 60 + parseFloat(match[2]);
+
+            await pool.query(
+              `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+               VALUES ($1, $2, $3, 0)
+               ON CONFLICT (id_pilota, id_ps) DO UPDATE SET tempo_secondi = $3`,
+              [pilotaId, id_ps, tempoSecondi]
+            );
+            tempiImportati++;
+          }
+        }
+
+      } catch (err) {
+        console.error(`Errore import record:`, err.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      piloti_importati: pilotiImportati,
+      tempi_importati: tempiImportati,
+      totale_record: dati.length
+    });
+
+  } catch (err) {
+    console.error('[IMPORT] Errore:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
