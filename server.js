@@ -841,11 +841,13 @@ app.get('/api/ficr/manifestazioni', async (req, res) => {
   try {
     const anno = req.query.anno || new Date().getFullYear();
     
-    const url = `https://apienduro.ficr.it/END/mpcache-30/get/combogeneral/${anno}`;
+    const url = `https://apienduro.ficr.it/END/mpcache-30/get/schedule/${anno}/*/*`;
     const response = await axios.get(url);
     
-    // Ritorna dati grezzi da FICR
-    res.json(response.data);
+    // Estrai array data se presente
+    const gare = response.data?.data || response.data;
+    
+    res.json(gare);
     
   } catch (err) {
     res.status(500).json({ error: 'Errore chiamata API FICR: ' + err.message });
