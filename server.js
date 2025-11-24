@@ -65,11 +65,19 @@ app.post('/api/eventi', async (req, res) => {
       descrizione 
     } = req.body;
     
+    // UPSERT: aggiorna se esiste, crea se non esiste
     const result = await pool.query(
       `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione) 
        VALUES ($1, $2, $3, $4, $5, $6) 
+       ON CONFLICT (codice_gara) 
+       DO UPDATE SET 
+         nome_evento = EXCLUDED.nome_evento,
+         data_inizio = EXCLUDED.data_inizio,
+         data_fine = EXCLUDED.data_fine,
+         luogo = EXCLUDED.luogo,
+         descrizione = EXCLUDED.descrizione
        RETURNING *`,
-      [nome_evento, codice_gara || null, data_inizio, data_fine || data_inizio, luogo, descrizione || null]
+      [nome_evento, codice_gara, data_inizio, data_fine || data_inizio, luogo, descrizione || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
