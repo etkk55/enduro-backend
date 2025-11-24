@@ -55,13 +55,24 @@ app.get('/api/eventi/:id', async (req, res) => {
 // POST crea evento
 app.post('/api/eventi', async (req, res) => {
   try {
-    const { nome_evento, data_evento, luogo } = req.body;
+    const { 
+      nome_evento, 
+      codice_gara,
+      data_inizio,
+      data_fine, 
+      luogo,
+      descrizione 
+    } = req.body;
+    
     const result = await pool.query(
-      'INSERT INTO eventi (nome_evento, data_evento, luogo) VALUES ($1, $2, $3) RETURNING *',
-      [nome_evento, data_evento, luogo]
+      `INSERT INTO eventi (nome_evento, codice_gara, data_inizio, data_fine, luogo, descrizione) 
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING *`,
+      [nome_evento, codice_gara || null, data_inizio, data_fine || data_inizio, luogo, descrizione || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    console.error('[POST /api/eventi] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -136,6 +147,20 @@ app.get('/api/eventi/:id_evento/prove', async (req, res) => {
 
 // POST crea prova speciale
 app.post('/api/prove', async (req, res) => {
+  try {
+    const { nome_ps, numero_ordine, id_evento, stato } = req.body;
+    const result = await pool.query(
+      'INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato) VALUES ($1, $2, $3, $4) RETURNING *',
+      [nome_ps, numero_ordine, id_evento, stato || 'non_iniziata']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Alias per compatibilità
+app.post('/api/prove-speciali', async (req, res) => {
   try {
     const { nome_ps, numero_ordine, id_evento, stato } = req.body;
     const result = await pool.query(
