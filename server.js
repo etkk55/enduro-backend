@@ -31,9 +31,10 @@ pool.query('SELECT NOW()', (err, res) => {
 // GET tutti gli eventi
 app.get('/api/eventi', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM eventi ORDER BY data_evento DESC');
+    const result = await pool.query('SELECT * FROM eventi ORDER BY data_inizio DESC');
     res.json(result.rows);
   } catch (err) {
+    console.error('[GET /api/eventi] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -89,6 +90,16 @@ app.delete('/api/eventi/:id', async (req, res) => {
 });
 
 // ==================== PILOTI ====================
+
+// GET tutti i piloti
+app.get('/api/piloti', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM piloti ORDER BY id_evento, numero_gara');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET piloti per evento
 app.get('/api/eventi/:id_evento/piloti', async (req, res) => {
