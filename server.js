@@ -841,7 +841,7 @@ app.get('/api/ficr/manifestazioni', async (req, res) => {
   try {
     const anno = req.query.anno || new Date().getFullYear();
     
-    const url = `https://apienduro.ficr.it/END/mpcache-30/get/schedule/${anno}/*/*`;
+    const url = `https://apienduro.ficr.it/END/mpcache-30/get/combogeneral/${anno}`;
     const response = await axios.get(url);
     
     // Ritorna dati grezzi da FICR
