@@ -923,9 +923,15 @@ app.post('/api/import-ficr', async (req, res) => {
     console.log(`[IMPORT] Chiamata FICR: ${url}`);
     
     const response = await axios.get(url);
-    const dati = response.data;
+    
+    // FICR ritorna { code, status, message, data: { clasdella: [...] } }
+    const dati = response.data?.data?.clasdella || [];
+
+    console.log(`[IMPORT] Risposta FICR:`, response.data);
+    console.log(`[IMPORT] Piloti trovati:`, dati.length);
 
     if (!dati || !Array.isArray(dati) || dati.length === 0) {
+      console.log(`[IMPORT] Nessun dato trovato`);
       return res.status(404).json({ error: 'Nessun dato trovato da FICR' });
     }
 
@@ -937,13 +943,14 @@ app.post('/api/import-ficr', async (req, res) => {
     // 2. Importa piloti e tempi
     for (const record of dati) {
       try {
-        const numeroGara = parseInt(record.NumeroGara);
+        // FICR usa "Numero" non "NumeroGara"
+        const numeroGara = parseInt(record.Numero);
         const cognome = record.Cognome || '';
         const nome = record.Nome || '';
         const classe = record.Classe || '';
         const moto = record.Moto || '';
-        const team = record.Team || '';
-        const nazione = record.Nazione || 'ITA';
+        const team = record.Motoclub || '';  // FICR usa "Motoclub"
+        const nazione = record.Naz || 'ITA';  // FICR usa "Naz"
 
         console.log(`[IMPORT] Processo pilota #${numeroGara}: ${nome} ${cognome}`);
 
