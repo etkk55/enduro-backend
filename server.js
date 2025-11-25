@@ -932,6 +932,8 @@ app.post('/api/import-ficr', async (req, res) => {
     let pilotiImportati = 0;
     let tempiImportati = 0;
 
+    console.log(`[IMPORT] Inizio import: ${dati.length} record da processare`);
+
     // 2. Importa piloti e tempi
     for (const record of dati) {
       try {
@@ -943,6 +945,8 @@ app.post('/api/import-ficr', async (req, res) => {
         const team = record.Team || '';
         const nazione = record.Nazione || 'ITA';
 
+        console.log(`[IMPORT] Processo pilota #${numeroGara}: ${nome} ${cognome}`);
+
         // Verifica se pilota esiste
         let pilotaResult = await pool.query(
           'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
@@ -952,6 +956,7 @@ app.post('/api/import-ficr', async (req, res) => {
         let pilotaId;
         if (pilotaResult.rows.length === 0) {
           // Crea pilota
+          console.log(`[IMPORT] Creo nuovo pilota #${numeroGara}`);
           const insertResult = await pool.query(
             `INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, nazione)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -960,8 +965,10 @@ app.post('/api/import-ficr', async (req, res) => {
           );
           pilotaId = insertResult.rows[0].id;
           pilotiImportati++;
+          console.log(`[IMPORT] Pilota creato con ID: ${pilotaId}`);
         } else {
           pilotaId = pilotaResult.rows[0].id;
+          console.log(`[IMPORT] Pilota #${numeroGara} già esistente: ${pilotaId}`);
         }
 
         // Importa tempo se presente
@@ -971,6 +978,8 @@ app.post('/api/import-ficr', async (req, res) => {
           if (match) {
             const tempoSecondi = parseInt(match[1]) * 60 + parseFloat(match[2]);
 
+            console.log(`[IMPORT] Salvo tempo per pilota ${pilotaId}: ${tempoSecondi}s`);
+            
             await pool.query(
               `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
                VALUES ($1, $2, $3, 0)
@@ -978,13 +987,17 @@ app.post('/api/import-ficr', async (req, res) => {
               [pilotaId, id_ps, tempoSecondi]
             );
             tempiImportati++;
+            console.log(`[IMPORT] Tempo salvato`);
           }
         }
 
       } catch (err) {
-        console.error(`Errore import record:`, err.message);
+        console.error(`[IMPORT] Errore import record:`, err.message);
+        console.error(`[IMPORT] Stack:`, err.stack);
       }
     }
+
+    console.log(`[IMPORT] Completato: ${pilotiImportati} piloti, ${tempiImportati} tempi`);
 
     res.json({
       success: true,
