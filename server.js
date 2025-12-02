@@ -1019,6 +1019,130 @@ app.post('/api/import-ficr', async (req, res) => {
   }
 });
 
+// ============================================
+// ENDPOINT COMUNICATI
+// ============================================
+
+// 1. CREA COMUNICATO
+app.post('/api/comunicati', async (req, res) => {
+  const { codice_gara, testo } = req.body;
+  
+  if (!codice_gara || !testo) {
+    return res.status(400).json({ error: 'Codice gara e testo obbligatori' });
+  }
+
+  try {
+    const numeroResult = await pool.query(
+      'SELECT get_next_comunicato_number($1) as numero',
+      [codice_gara]
+    );
+    const numero = numeroResult.rows[0].numero;
+
+    const result = await pool.query(
+      `INSERT INTO comunicati (codice_gara, numero, testo, ora, data)
+       VALUES ($1, $2, $3, CURRENT_TIME, CURRENT_DATE)
+       RETURNING *`,
+      [codice_gara, numero, testo]
+    );
+
+    const comunicato = result.rows[0];
+
+    res.status(201).json({
+      success: true,
+      comunicato: {
+        id: comunicato.id,
+        numero: comunicato.numero,
+        ora: comunicato.ora,
+        data: comunicato.data,
+        testo: comunicato.testo,
+        codice_gara: comunicato.codice_gara
+      }
+    });
+  } catch (error) {
+    console.error('Errore creazione comunicato:', error);
+    res.status(500).json({ error: 'Errore creazione comunicato' });
+  }
+});
+
+// 2. LISTA COMUNICATI PER GARA
+app.get('/api/comunicati/:codice_gara', async (req, res) => {
+  const { codice_gara } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, numero, ora, data, testo, created_at, updated_at,
+              jsonb_array_length(letto_da) as num_letti
+       FROM comunicati
+       WHERE codice_gara = $1
+       ORDER BY numero DESC`,
+      [codice_gara]
+    );
+
+    res.json({ success: true, comunicati: result.rows });
+  } catch (error) {
+    console.error('Errore recupero comunicati:', error);
+    res.status(500).json({ error: 'Errore recupero comunicati' });
+  }
+});
+
+// 3. ELIMINA COMUNICATO
+app.delete('/api/comunicati/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await pool.query('DELETE FROM comunicati WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Errore eliminazione:', error);
+    res.status(500).json({ error: 'Errore eliminazione' });
+  }
+});
+
+// 4. MODIFICA COMUNICATO
+app.put('/api/comunicati/:id', async (req, res) => {
+  const { id } = req.params;
+  const { testo } = req.body;
+
+  try {
+    const result = await pool.query(
+      `UPDATE comunicati SET testo = $2, updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [id, testo]
+    );
+
+    res.json({ success: true, comunicato: result.rows[0] });
+  } catch (error) {
+    console.error('Errore modifica:', error);
+    res.status(500).json({ error: 'Errore modifica' });
+  }
+});
+
+// 5. STATISTICHE
+app.get('/api/comunicati/:codice_gara/stats', async (req, res) => {
+  const { codice_gara } = req.params;
+
+  try {
+    const stats = await pool.query(
+      `SELECT COUNT(*) as totale_comunicati, MAX(numero) as ultimo_numero
+       FROM comunicati WHERE codice_gara = $1`,
+      [codice_gara]
+    );
+
+    const piloti = await pool.query(
+      'SELECT COUNT(*) as piloti_attivi FROM piloti_gara WHERE codice_gara = $1',
+      [codice_gara]
+    );
+
+    res.json({
+      success: true,
+      stats: { ...stats.rows[0], piloti_attivi: piloti.rows[0].piloti_attivi }
+    });
+  } catch (error) {
+    console.error('Errore statistiche:', error);
+    res.status(500).json({ error: 'Errore statistiche' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
