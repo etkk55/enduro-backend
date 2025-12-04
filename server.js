@@ -1101,6 +1101,7 @@ app.get('/api/comunicati/:codice_gara', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, numero, ora, data, testo, created_at, updated_at,
+              pdf_allegato, pdf_nome,
               jsonb_array_length(letto_da) as num_letti
        FROM comunicati
        WHERE codice_gara = $1
@@ -1158,14 +1159,16 @@ app.get('/api/comunicati/:codice_gara/stats', async (req, res) => {
       [codice_gara]
     );
 
-    const piloti = await pool.query(
-      'SELECT COUNT(*) as piloti_attivi FROM piloti_gara WHERE codice_gara = $1',
-      [codice_gara]
-    );
+    // Rimosso query piloti_gara (tabella non esiste)
+    // TODO: implementare quando si fa import FICR
 
     res.json({
       success: true,
-      stats: { ...stats.rows[0], piloti_attivi: piloti.rows[0].piloti_attivi }
+      stats: { 
+        totale_comunicati: stats.rows[0].totale_comunicati,
+        ultimo_numero: stats.rows[0].ultimo_numero,
+        piloti_attivi: 0  // placeholder
+      }
     });
   } catch (error) {
     console.error('Errore statistiche:', error);
