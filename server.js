@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 8080;
 
 // CORS - Allow all origins
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // PostgreSQL Pool - Railway provides DATABASE_URL as environment variable
 const pool = new Pool({
