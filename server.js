@@ -31,8 +31,25 @@ pool.query('SELECT NOW()', (err, res) => {
       ADD COLUMN IF NOT EXISTS pdf_nome VARCHAR(255);
     `).then(() => {
       console.log('Migrazione comunicati PDF completata');
+      
+      // Crea funzione get_next_comunicato_number se non esiste
+      return pool.query(`
+        CREATE OR REPLACE FUNCTION get_next_comunicato_number(p_codice_gara VARCHAR)
+        RETURNS INTEGER AS $$
+        DECLARE
+          next_num INTEGER;
+        BEGIN
+          SELECT COALESCE(MAX(numero), 0) + 1 INTO next_num
+          FROM comunicati
+          WHERE codice_gara = p_codice_gara;
+          RETURN next_num;
+        END;
+        $$ LANGUAGE plpgsql;
+      `);
+    }).then(() => {
+      console.log('Funzione get_next_comunicato_number creata');
     }).catch(err => {
-      console.error('Errore migrazione PDF:', err);
+      console.error('Errore migrazione:', err);
     });
   }
 });
