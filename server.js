@@ -23,6 +23,17 @@ pool.query('SELECT NOW()', (err, res) => {
     console.error('Database connection error:', err);
   } else {
     console.log('Database connected successfully at:', res.rows[0].now);
+    
+    // Auto-migrazione: aggiungi colonne PDF se non esistono
+    pool.query(`
+      ALTER TABLE comunicati 
+      ADD COLUMN IF NOT EXISTS pdf_allegato TEXT,
+      ADD COLUMN IF NOT EXISTS pdf_nome VARCHAR(255);
+    `).then(() => {
+      console.log('Migrazione comunicati PDF completata');
+    }).catch(err => {
+      console.error('Errore migrazione PDF:', err);
+    });
   }
 });
 
@@ -1025,7 +1036,7 @@ app.post('/api/import-ficr', async (req, res) => {
 
 // 1. CREA COMUNICATO
 app.post('/api/comunicati', async (req, res) => {
-  const { codice_gara, testo } = req.body;
+  const { codice_gara, testo, pdf_allegato, pdf_nome } = req.body;
   
   if (!codice_gara || !testo) {
     return res.status(400).json({ error: 'Codice gara e testo obbligatori' });
@@ -1039,10 +1050,10 @@ app.post('/api/comunicati', async (req, res) => {
     const numero = numeroResult.rows[0].numero;
 
     const result = await pool.query(
-      `INSERT INTO comunicati (codice_gara, numero, testo, ora, data)
-       VALUES ($1, $2, $3, CURRENT_TIME, CURRENT_DATE)
+      `INSERT INTO comunicati (codice_gara, numero, testo, ora, data, pdf_allegato, pdf_nome)
+       VALUES ($1, $2, $3, CURRENT_TIME, CURRENT_DATE, $4, $5)
        RETURNING *`,
-      [codice_gara, numero, testo]
+      [codice_gara, numero, testo, pdf_allegato || null, pdf_nome || null]
     );
 
     const comunicato = result.rows[0];
@@ -1055,7 +1066,9 @@ app.post('/api/comunicati', async (req, res) => {
         ora: comunicato.ora,
         data: comunicato.data,
         testo: comunicato.testo,
-        codice_gara: comunicato.codice_gara
+        codice_gara: comunicato.codice_gara,
+        pdf_allegato: comunicato.pdf_allegato,
+        pdf_nome: comunicato.pdf_nome
       }
     });
   } catch (error) {
