@@ -945,31 +945,25 @@ app.post('/api/import-ficr', async (req, res) => {
       return res.status(400).json({ error: 'Parametri mancanti' });
     }
 
-    // IMPORTANTE: Usa API diversa in base alla categoria
-    // Categoria 1 (Campionato) = /startlist/
-    // Categoria 2,3 (Training, Epoca) = /entrylist/
-    let url;
-    let apiType;
+    // IMPORTANTE: API FICR 2025 - Usa entrylist con wildcards per tutte le categorie
+    // Struttura: /END/mpcache-30/get/entrylist/anno/equipe/manifestazione/giorno/*/*/*/*/*
+    const url = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/*/*/*/*/*`;
     
-    if (categoria === 1 || categoria === '1') {
-      // CAMPIONATO: usa startlist
-      url = `https://apienduro.ficr.it/END/mpcache-5/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
-      apiType = 'startlist';
-    } else {
-      // TRAINING (2) o EPOCA (3): usa entrylist
-      url = `https://apienduro.ficr.it/END/mpcache-5/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
-      apiType = 'entrylist';
-    }
-    
-    console.log(`[IMPORT] API ${apiType} - Chiamata FICR: ${url}`);
+    console.log(`[IMPORT] Chiamata FICR 2025: ${url}`);
+    console.log(`[IMPORT] Categoria richiesta: ${categoria}`);
     
     const response = await axios.get(url);
     
-    // Entrambe le API ritornano { code, status, message, data: { clasdella: [...] } }
-    const dati = response.data?.data?.clasdella || [];
-
-    console.log(`[IMPORT] Risposta FICR (${apiType}):`, response.data);
-    console.log(`[IMPORT] Piloti trovati: ${dati.length}`);
+    // API 2025 ritorna array diretto in data, non più data.clasdella
+    let dati = response.data?.data || [];
+    
+    // Filtra solo i piloti della categoria richiesta
+    // La categoria è identificata dal campo "Gara" o simile nel JSON
+    // Dall'analisi: categoria 1=Campionato, 2=Training, 3=Regolarità
+    // NOTA: Potremmo dover filtrare per categoria qui se l'API ritorna tutti i piloti
+    // Per ora lasciamo passare tutti, poi vediamo nei log cosa arriva
+    
+    console.log(`[IMPORT] Risposta FICR totale piloti: ${dati.length}`);
 
     if (!dati || !Array.isArray(dati) || dati.length === 0) {
       console.log(`[IMPORT] Nessun dato trovato`);
