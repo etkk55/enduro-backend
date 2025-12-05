@@ -953,11 +953,11 @@ app.post('/api/import-ficr', async (req, res) => {
     
     if (categoria === 1 || categoria === '1') {
       // CAMPIONATO: usa startlist
-      url = `https://apienduro.ficr.it/END/mpcache-5/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
+      url = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
       apiType = 'startlist';
     } else {
       // TRAINING (2) o EPOCA (3): usa entrylist
-      url = `https://apienduro.ficr.it/END/mpcache-5/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
+      url = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
       apiType = 'entrylist';
     }
     
