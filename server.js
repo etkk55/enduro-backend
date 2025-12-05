@@ -945,18 +945,31 @@ app.post('/api/import-ficr', async (req, res) => {
       return res.status(400).json({ error: 'Parametri mancanti' });
     }
 
-    // 1. Chiamata API FICR
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}/*/*/*/*/*`;
+    // IMPORTANTE: Usa API diversa in base alla categoria
+    // Categoria 1 (Campionato) = /startlist/
+    // Categoria 2,3 (Training, Epoca) = /entrylist/
+    let url;
+    let apiType;
     
-    console.log(`[IMPORT] Chiamata FICR: ${url}`);
+    if (categoria === 1 || categoria === '1') {
+      // CAMPIONATO: usa startlist
+      url = `https://apienduro.ficr.it/END/mpcache-5/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
+      apiType = 'startlist';
+    } else {
+      // TRAINING (2) o EPOCA (3): usa entrylist
+      url = `https://apienduro.ficr.it/END/mpcache-5/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/${prova}/${categoria}`;
+      apiType = 'entrylist';
+    }
+    
+    console.log(`[IMPORT] API ${apiType} - Chiamata FICR: ${url}`);
     
     const response = await axios.get(url);
     
-    // FICR ritorna { code, status, message, data: { clasdella: [...] } }
+    // Entrambe le API ritornano { code, status, message, data: { clasdella: [...] } }
     const dati = response.data?.data?.clasdella || [];
 
-    console.log(`[IMPORT] Risposta FICR:`, response.data);
-    console.log(`[IMPORT] Piloti trovati:`, dati.length);
+    console.log(`[IMPORT] Risposta FICR (${apiType}):`, response.data);
+    console.log(`[IMPORT] Piloti trovati: ${dati.length}`);
 
     if (!dati || !Array.isArray(dati) || dati.length === 0) {
       console.log(`[IMPORT] Nessun dato trovato`);
