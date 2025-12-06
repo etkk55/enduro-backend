@@ -945,25 +945,28 @@ app.post('/api/import-ficr', async (req, res) => {
       return res.status(400).json({ error: 'Parametri mancanti' });
     }
 
-    // IMPORTANTE: API FICR 2025 - Usa entrylist con wildcards per tutte le categorie
-    // Struttura: /END/mpcache-30/get/entrylist/anno/equipe/manifestazione/giorno/*/*/*/*/*
-    const url = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/*/*/*/*/*`;
+    // IMPORTANTE: API FICR 2025 - Usa entrylist con wildcards
+    // URL confermata tramite ispezione rete browser
+    const url = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/*/*/*/*/*/*/*`;
     
     console.log(`[IMPORT] Chiamata FICR 2025: ${url}`);
     console.log(`[IMPORT] Categoria richiesta: ${categoria}`);
     
-    const response = await axios.get(url);
+    // HEADER OBBLIGATORI per API FICR (verificati tramite browser inspector)
+    const headers = {
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://enduro.ficr.it',
+      'Referer': 'https://enduro.ficr.it/',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)',
+      'Cache-Control': 'Private',
+      'Pragma': 'no-cache'
+    };
     
-    // API 2025 ritorna array diretto in data, non più data.clasdella
-    let dati = response.data?.data || [];
+    const response = await axios.get(url, { headers });
     
-    // Filtra solo i piloti della categoria richiesta
-    // La categoria è identificata dal campo "Gara" o simile nel JSON
-    // Dall'analisi: categoria 1=Campionato, 2=Training, 3=Regolarità
-    // NOTA: Potremmo dover filtrare per categoria qui se l'API ritorna tutti i piloti
-    // Per ora lasciamo passare tutti, poi vediamo nei log cosa arriva
-    
-    console.log(`[IMPORT] Risposta FICR totale piloti: ${dati.length}`);
+    // API 2025 ritorna array diretto in data
+    let dati = response.data?.data || [];    
+    console.log(`[IMPORT] Risposta FICR - Totale piloti ricevuti: ${dati.length}`);
 
     if (!dati || !Array.isArray(dati) || dati.length === 0) {
       console.log(`[IMPORT] Nessun dato trovato`);
