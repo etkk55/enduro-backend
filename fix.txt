@@ -1,0 +1,1 @@
+tempiPerPilota[t.id_pilota][`ps${t.numero_ordine}`] = t.tempo_secondi;
