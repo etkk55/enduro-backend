@@ -588,6 +588,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
     // 6. Genera snapshots progressivi
     const snapshots = [];
     const numProve = proveResult.rows.length;
+    let posizioniPrecedenti = {};  // Traccia posizioni per calcolo frecce
     
     for (let psNum = 1; psNum <= numProve; psNum++) {
       // Calcola classifica parziale fino a questa prova
@@ -653,8 +654,13 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           classe: p.classe,
           ...psData,
           totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
-          var: 0
+          var: posizioniPrecedenti[p.num] ? posizioniPrecedenti[p.num] - pos : 0
         };
+      });
+      
+      // Salva posizioni attuali per il prossimo snapshot
+      classifica.forEach(pilot => {
+        posizioniPrecedenti[pilot.num] = pilot.pos;
       });
       
       snapshots.push({
