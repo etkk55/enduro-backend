@@ -721,9 +721,9 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
       });
       
       snapshots.push({
-        step: psNum,
-        descrizione: `Dopo ${proveResult.rows[psNum - 1].nome_ps}`,
-        prova_corrente: psNum,
+        step: psIdx + 1,
+        descrizione: `Dopo ${proveResult.rows[psIdx].nome_ps}`,
+        prova_corrente: psIdx + 1,
         classifica
       });
     }
