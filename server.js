@@ -941,18 +941,21 @@ app.post('/api/import-ficr', async (req, res) => {
     } = req.body;
 
     // Validazione parametri
-    if (!anno || !codiceEquipe || !manifestazione || !giorno || !prova || !categoria || !id_evento || !id_ps) {
+    if (!anno || !codiceEquipe || !manifestazione || !categoria || !id_evento || !id_ps) {
       return res.status(400).json({ error: 'Parametri mancanti' });
     }
 
-    // IMPORTANTE: API FICR 2025 - Usa entrylist con wildcards
-    // URL confermata tramite ispezione rete browser
-    const url = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${codiceEquipe}/${manifestazione}/${giorno}/*/*/*/*/*/*/*`;
+    // API CLASPS - Sistema STANDARD Triveneto
+    // URL: /clasps/ANNO/EQUIPE/MANIFESTAZIONE/GARA/PROVA/CATEGORIA/*/*/*/*/*
+    // GARA = categoria richiesta (1=Campionato, 2=Training, 3=Epoca, etc.)
+    // PROVA = 2 (sempre la prima prova cronometrata, 1 è controllo orario)
+    // CATEGORIA = 1 (tutte le categorie piloti)
+    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/2/1/*/*/*/*/*`;
     
-    console.log(`[IMPORT] Chiamata FICR 2025: ${url}`);
-    console.log(`[IMPORT] Categoria richiesta: ${categoria}`);
+    console.log(`[IMPORT] Chiamata FICR CLASPS 2025: ${url}`);
+    console.log(`[IMPORT] Gara richiesta: ${categoria}`);
     
-    // HEADER OBBLIGATORI per API FICR (verificati tramite browser inspector)
+    // HEADER OBBLIGATORI per API FICR
     const headers = {
       'Accept': 'application/json, text/plain, */*',
       'Origin': 'https://enduro.ficr.it',
@@ -964,9 +967,10 @@ app.post('/api/import-ficr', async (req, res) => {
     
     const response = await axios.get(url, { headers });
     
-    // API 2025 ritorna array diretto in data
-    let dati = response.data?.data || [];    
-    console.log(`[IMPORT] Risposta FICR - Totale piloti ricevuti: ${dati.length}`);
+    // API CLASPS ritorna: { code, status, message, data: { clasdella: [...] } }
+    const dati = response.data?.data?.clasdella || [];
+
+    console.log(`[IMPORT] Risposta FICR - Piloti trovati: ${dati.length}`);
 
     if (!dati || !Array.isArray(dati) || dati.length === 0) {
       console.log(`[IMPORT] Nessun dato trovato`);
