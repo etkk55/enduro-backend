@@ -590,60 +590,79 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
     const numProve = proveResult.rows.length;
     let posizioniPrecedenti = {};  // Traccia posizioni per calcolo frecce
     
-    for (let psNum = 1; psNum <= numProve; psNum++) {
+    // Array dei numero_ordine reali delle prove (es. [2,3,4,6,7,8,10])
+    const proveReali = proveResult.rows.map(p => p.numero_ordine);
+    
+    for (let psIdx = 0; psIdx < numProve; psIdx++) {
+      // Prove richieste fino a questo snapshot (es. snapshot 2 = prove [2,3])
+      const proveRichieste = proveReali.slice(0, psIdx + 1);
+      
       // Calcola classifica parziale fino a questa prova
-      const classificaParziale = pilotiResult.rows
-        .map(p => {
-          let tempoTotale = 0;
-          const tempi_ps = {};
-          
-          for (let i = 1; i <= psNum; i++) {
-            const tempo = tempiPerPilota[p.id]?.[`ps${i}`];
-            if (tempo) {
-              tempoTotale += parseFloat(tempo);
-              tempi_ps[`ps${i}`] = tempo;
-              tempi_ps[`ps${i}_time`] = tempo;
-            }
+      const tuttiPiloti = pilotiResult.rows.map(p => {
+        let tempoTotale = 0;
+        let proveCompletate = 0;
+        const tempi_ps = {};
+        
+        // Usa i numeri reali delle prove
+        for (const numProva of proveRichieste) {
+          const tempo = tempiPerPilota[p.id]?.[`ps${numProva}`];
+          if (tempo) {
+            tempoTotale += parseFloat(tempo);
+            tempi_ps[`ps${numProva}`] = tempo;
+            tempi_ps[`ps${numProva}_time`] = tempo;
+            proveCompletate++;
           }
-          
-          return {
-            id_pilota: p.id,
-            num: p.numero_gara,
-            nome: p.nome,
-            cognome: p.cognome,
-            classe: p.classe || '',
-            moto: p.moto || '',
-            tempo_totale_sec: tempoTotale,
-            tempi_ps
-          };
-        })
-        .filter(p => p.tempo_totale_sec > 0)
+        }
+        
+        return {
+          id_pilota: p.id,
+          num: p.numero_gara,
+          nome: p.nome,
+          cognome: p.cognome,
+          classe: p.classe || '',
+          moto: p.moto || '',
+          tempo_totale_sec: tempoTotale,
+          tempi_ps,
+          proveCompletate,
+          proveRichieste: proveRichieste.length,
+          isRitirato: proveCompletate < proveRichieste.length && proveCompletate > 0
+        };
+      });
+      
+      // Separa attivi e ritirati
+      const pilotiAttivi = tuttiPiloti
+        .filter(p => p.proveCompletate === p.proveRichieste && p.tempo_totale_sec > 0)
         .sort((a, b) => a.tempo_totale_sec - b.tempo_totale_sec);
       
-      // Formatta classifica
-      const classifica = classificaParziale.map((p, idx) => {
+      const pilotiRitirati = tuttiPiloti
+        .filter(p => p.isRitirato)
+        .sort((a, b) => b.proveCompletate - a.proveCompletate || a.tempo_totale_sec - b.tempo_totale_sec);
+      
+      // Formatta classifica attivi
+      const classificaAttivi = pilotiAttivi.map((p, idx) => {
         const tempoTotale = p.tempo_totale_sec;
         const minutes = Math.floor(tempoTotale / 60);
         const seconds = tempoTotale % 60;
         const pos = idx + 1;
         
-        // Dati PS
+        // Dati PS con numeri reali
         const psData = {};
-        for (let i = 1; i <= psNum; i++) {
+        for (let i = 0; i <= psIdx; i++) {
+          const numProva = proveReali[i];
           if (idx === 0) {
-            psData[`ps${i}`] = '0.0';
+            psData[`ps${i+1}`] = '0.0';
           } else {
-            const prevTempo = classificaParziale[idx - 1].tempo_totale_sec;
+            const prevTempo = pilotiAttivi[idx - 1].tempo_totale_sec;
             const gap = tempoTotale - prevTempo;
-            psData[`ps${i}`] = `+${gap.toFixed(1)}`;
+            psData[`ps${i+1}`] = `+${gap.toFixed(1)}`;
           }
-          psData[`ps${i}_time`] = p.tempi_ps[`ps${i}_time`] || null;
+          psData[`ps${i+1}_time`] = p.tempi_ps[`ps${numProva}_time`] || null;
         }
         
         // PS non ancora corse
-        for (let i = psNum + 1; i <= numProve; i++) {
-          psData[`ps${i}`] = null;
-          psData[`ps${i}_time`] = null;
+        for (let i = psIdx + 1; i < numProve; i++) {
+          psData[`ps${i+1}`] = null;
+          psData[`ps${i+1}_time`] = null;
         }
         
         return {
@@ -654,12 +673,50 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           classe: p.classe,
           ...psData,
           totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
-          var: posizioniPrecedenti[p.num] ? posizioniPrecedenti[p.num] - pos : 0
+          var: posizioniPrecedenti[p.num] ? posizioniPrecedenti[p.num] - pos : 0,
+          stato: 'attivo'
         };
       });
       
-      // Salva posizioni attuali per il prossimo snapshot
-      classifica.forEach(pilot => {
+      // Formatta classifica ritirati
+      const classificaRitirati = pilotiRitirati.map((p, idx) => {
+        const tempoTotale = p.tempo_totale_sec;
+        const minutes = Math.floor(tempoTotale / 60);
+        const seconds = tempoTotale % 60;
+        const posRit = pilotiAttivi.length + idx + 1;
+        
+        // Dati PS
+        const psData = {};
+        for (let i = 0; i <= psIdx; i++) {
+          const numProva = proveReali[i];
+          psData[`ps${i+1}`] = p.tempi_ps[`ps${numProva}`] ? '+RIT' : 'RIT';
+          psData[`ps${i+1}_time`] = p.tempi_ps[`ps${numProva}_time`] || null;
+        }
+        
+        // PS non ancora corse
+        for (let i = psIdx + 1; i < numProve; i++) {
+          psData[`ps${i+1}`] = null;
+          psData[`ps${i+1}_time`] = null;
+        }
+        
+        return {
+          pos: posRit,
+          num: p.num,
+          cognome: p.cognome,
+          nome: p.nome,
+          classe: p.classe,
+          ...psData,
+          totale: `RIT (${p.proveCompletate}/${p.proveRichieste})`,
+          var: 0,
+          stato: 'ritirato'
+        };
+      });
+      
+      // Combina classifica
+      const classifica = [...classificaAttivi, ...classificaRitirati];
+      
+      // Salva posizioni attuali (solo attivi) per il prossimo snapshot
+      classificaAttivi.forEach(pilot => {
         posizioniPrecedenti[pilot.num] = pilot.pos;
       });
       
@@ -954,9 +1011,9 @@ app.post('/api/import-ficr', async (req, res) => {
     // API CLASPS - Sistema STANDARD Triveneto
     // URL: /clasps/ANNO/EQUIPE/MANIFESTAZIONE/GARA/PROVA/CATEGORIA/*/*/*/*/*
     // GARA = categoria richiesta (1=Campionato, 2=Training, 3=Epoca, etc.)
-    // PROVA = numero prova cronometrata (2,3,4,5... - 1 è controllo orario)
+    // PROVA = 2 (sempre la prima prova cronometrata, 1 è controllo orario)
     // CATEGORIA = 1 (tutte le categorie piloti)
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/${prova}/1/*/*/*/*/*`;
+    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/2/1/*/*/*/*/*`;
     
     console.log(`[IMPORT] Chiamata FICR CLASPS 2025: ${url}`);
     console.log(`[IMPORT] Gara richiesta: ${categoria}`);
