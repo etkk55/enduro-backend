@@ -712,6 +712,8 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
           // Variazione specifica di quella prova
           psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
+          // Posizione in quella prova specifica
+          psData[`pos${i+1}`] = p.storia[i]?.posizione || null;
         }
         
         // PS non ancora corse
@@ -719,6 +721,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           psData[`ps${i+1}`] = null;
           psData[`ps${i+1}_time`] = null;
           psData[`var${i+1}`] = null;
+          psData[`pos${i+1}`] = null;
         }
         
         return {
@@ -753,6 +756,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           }
           psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
           psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
+          psData[`pos${i+1}`] = p.storia[i]?.posizione || null;
         }
         
         // PS non ancora corse
@@ -760,6 +764,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           psData[`ps${i+1}`] = null;
           psData[`ps${i+1}_time`] = null;
           psData[`var${i+1}`] = null;
+          psData[`pos${i+1}`] = null;
         }
         
         return {
