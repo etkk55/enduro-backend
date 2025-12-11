@@ -666,6 +666,16 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
         }
       });
       
+      // FIX Chat 13: Calcola posizione per tempo SINGOLA PS (non cumulativo)
+      // Filtra piloti che hanno completato QUESTA specifica prova
+      const pilotiConTempoPS = pilotiConStoria.filter(p => p.storia[psIdx]?.tempoProva);
+      // Ordina per tempo della singola prova
+      pilotiConTempoPS.sort((a, b) => a.storia[psIdx].tempoProva - b.storia[psIdx].tempoProva);
+      // Assegna posizione tempo PS
+      pilotiConTempoPS.forEach((p, idx) => {
+        p.storia[psIdx].posizioneTempoPS = idx + 1;
+      });
+      
       // Piloti non validi (ritirati) - nessuna posizione per questa prova
       pilotiConStoria.filter(p => !pilotiValidi.includes(p)).forEach(p => {
         if (!p.storia[psIdx]) p.storia[psIdx] = {};
@@ -673,6 +683,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
         p.storia[psIdx].gap = null;
         p.storia[psIdx].gapStr = null;
         p.storia[psIdx].variazione = 0;
+        // posizioneTempoPS già assegnata sopra se ha tempo
       });
     }
     
@@ -712,8 +723,8 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
           // Variazione specifica di quella prova
           psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
-          // Posizione in quella prova specifica
-          psData[`pos${i+1}`] = p.storia[i]?.posizione || null;
+          // FIX: Posizione per TEMPO SINGOLA PS (non classifica generale)
+          psData[`pos${i+1}`] = p.storia[i]?.posizioneTempoPS || null;
         }
         
         // PS non ancora corse
@@ -756,7 +767,8 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           }
           psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
           psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
-          psData[`pos${i+1}`] = p.storia[i]?.posizione || null;
+          // FIX: Posizione per TEMPO SINGOLA PS (non classifica generale)
+          psData[`pos${i+1}`] = p.storia[i]?.posizioneTempoPS || null;
         }
         
         // PS non ancora corse
