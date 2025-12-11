@@ -538,6 +538,7 @@ app.get('/api/import-piloti-isola', async (req, res) => {
 });
 
 // ==================== EXPORT REPLAY ====================
+// FIX Chat 13: Gap e variazioni calcolati per ogni PS separatamente
   
 app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
   const { id_evento } = req.params;
@@ -577,92 +578,147 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
       if (!tempiPerPilota[t.id_pilota]) {
         tempiPerPilota[t.id_pilota] = {};
       }
-      tempiPerPilota[t.id_pilota][`ps${t.numero_ordine}`] = t.tempo_secondi;
+      tempiPerPilota[t.id_pilota][`ps${t.numero_ordine}`] = parseFloat(t.tempo_secondi);
     });
-    console.log('=== DEBUG TEMPI ===');
-    console.log('Totale piloti con tempi:', Object.keys(tempiPerPilota).length);
-    const primoPilota = Object.keys(tempiPerPilota)[0];
-    console.log('Primo pilota ID:', primoPilota);
-    console.log('Tempi primo pilota:', tempiPerPilota[primoPilota]);
     
-    // 6. Genera snapshots progressivi
-    const snapshots = [];
     const numProve = proveResult.rows.length;
-    let posizioniPrecedenti = {};  // Traccia posizioni per calcolo frecce
-    
-    // Array dei numero_ordine reali delle prove (es. [2,3,4,6,7,8,10])
     const proveReali = proveResult.rows.map(p => p.numero_ordine);
     
-    for (let psIdx = 0; psIdx < numProve; psIdx++) {
-      // Prove richieste fino a questo snapshot (es. snapshot 2 = prove [2,3])
-      const proveRichieste = proveReali.slice(0, psIdx + 1);
+    // ============================================
+    // FIX: Pre-calcola storia per ogni pilota
+    // Per ogni prova: tempo cumulativo, posizione, gap
+    // ============================================
+    
+    // 6. Calcola tempi cumulativi per ogni pilota dopo ogni prova
+    const pilotiConStoria = pilotiResult.rows.map(p => {
+      const storia = {};
+      let tempoCumulativo = 0;
+      let proveCompletate = 0;
       
-      // Calcola classifica parziale fino a questa prova
-      const tuttiPiloti = pilotiResult.rows.map(p => {
-        let tempoTotale = 0;
-        let proveCompletate = 0;
-        const tempi_ps = {};
+      for (let psIdx = 0; psIdx < numProve; psIdx++) {
+        const numProva = proveReali[psIdx];
+        const tempo = tempiPerPilota[p.id]?.[`ps${numProva}`];
         
-        // Usa i numeri reali delle prove
-        for (const numProva of proveRichieste) {
-          const tempo = tempiPerPilota[p.id]?.[`ps${numProva}`];
-          if (tempo) {
-            tempoTotale += parseFloat(tempo);
-            tempi_ps[`ps${numProva}`] = tempo;
-            tempi_ps[`ps${numProva}_time`] = tempo;
-            proveCompletate++;
-          }
+        if (tempo) {
+          tempoCumulativo += tempo;
+          proveCompletate++;
+          storia[psIdx] = {
+            tempoCumulativo,
+            tempoProva: tempo,
+            completata: true,
+            proveCompletate
+          };
+        } else {
+          storia[psIdx] = {
+            tempoCumulativo,
+            tempoProva: null,
+            completata: false,
+            proveCompletate
+          };
         }
-        
-        return {
-          id_pilota: p.id,
-          num: p.numero_gara,
-          nome: p.nome,
-          cognome: p.cognome,
-          classe: p.classe || '',
-          moto: p.moto || '',
-          tempo_totale_sec: tempoTotale,
-          tempi_ps,
-          proveCompletate,
-          proveRichieste: proveRichieste.length,
-          isRitirato: proveCompletate < proveRichieste.length && proveCompletate > 0
-        };
+      }
+      
+      return {
+        id: p.id,
+        num: p.numero_gara,
+        nome: p.nome,
+        cognome: p.cognome,
+        classe: p.classe || '',
+        moto: p.moto || '',
+        storia,
+        totalProveCompletate: proveCompletate
+      };
+    });
+    
+    // 7. Per ogni prova, calcola posizioni e gap progressivi
+    for (let psIdx = 0; psIdx < numProve; psIdx++) {
+      // Filtra piloti che hanno completato TUTTE le prove fino a questa
+      const pilotiValidi = pilotiConStoria.filter(p => {
+        for (let i = 0; i <= psIdx; i++) {
+          if (!p.storia[i]?.completata) return false;
+        }
+        return true;
       });
       
-      // Separa attivi e ritirati
-      const pilotiAttivi = tuttiPiloti
-        .filter(p => p.proveCompletate === p.proveRichieste && p.tempo_totale_sec > 0)
-        .sort((a, b) => a.tempo_totale_sec - b.tempo_totale_sec);
+      // Ordina per tempo cumulativo dopo questa prova
+      pilotiValidi.sort((a, b) => a.storia[psIdx].tempoCumulativo - b.storia[psIdx].tempoCumulativo);
       
-      const pilotiRitirati = tuttiPiloti
-        .filter(p => p.isRitirato)
-        .sort((a, b) => b.proveCompletate - a.proveCompletate || a.tempo_totale_sec - b.tempo_totale_sec);
+      // Assegna posizioni e gap
+      pilotiValidi.forEach((p, idx) => {
+        p.storia[psIdx].posizione = idx + 1;
+        
+        if (idx === 0) {
+          p.storia[psIdx].gap = 0;
+          p.storia[psIdx].gapStr = '0.0';
+        } else {
+          const gapSec = p.storia[psIdx].tempoCumulativo - pilotiValidi[idx - 1].storia[psIdx].tempoCumulativo;
+          p.storia[psIdx].gap = gapSec;
+          p.storia[psIdx].gapStr = `+${gapSec.toFixed(1)}`;
+        }
+        
+        // Calcola variazione rispetto alla prova precedente
+        if (psIdx === 0) {
+          p.storia[psIdx].variazione = 0;
+        } else if (p.storia[psIdx - 1]?.posizione) {
+          p.storia[psIdx].variazione = p.storia[psIdx - 1].posizione - p.storia[psIdx].posizione;
+        } else {
+          p.storia[psIdx].variazione = 0;
+        }
+      });
       
-      // Formatta classifica attivi
+      // Piloti non validi (ritirati) - nessuna posizione per questa prova
+      pilotiConStoria.filter(p => !pilotiValidi.includes(p)).forEach(p => {
+        if (!p.storia[psIdx]) p.storia[psIdx] = {};
+        p.storia[psIdx].posizione = null;
+        p.storia[psIdx].gap = null;
+        p.storia[psIdx].gapStr = null;
+        p.storia[psIdx].variazione = 0;
+      });
+    }
+    
+    // 8. Genera snapshots usando la storia pre-calcolata
+    const snapshots = [];
+    
+    for (let psIdx = 0; psIdx < numProve; psIdx++) {
+      const proveRichieste = psIdx + 1;
+      
+      // Separa attivi e ritirati per questo snapshot
+      const pilotiAttivi = pilotiConStoria
+        .filter(p => p.storia[psIdx]?.posizione !== null && p.storia[psIdx]?.posizione !== undefined)
+        .sort((a, b) => a.storia[psIdx].posizione - b.storia[psIdx].posizione);
+      
+      const pilotiRitirati = pilotiConStoria
+        .filter(p => {
+          // Ha almeno una prova ma non tutte fino a questa
+          const haAlmenoUna = p.totalProveCompletate > 0;
+          const nonTutte = p.storia[psIdx]?.posizione === null || p.storia[psIdx]?.posizione === undefined;
+          return haAlmenoUna && nonTutte;
+        })
+        .sort((a, b) => b.totalProveCompletate - a.totalProveCompletate);
+      
+      // Formatta classifica attivi con gap e variazioni PER OGNI PS
       const classificaAttivi = pilotiAttivi.map((p, idx) => {
-        const tempoTotale = p.tempo_totale_sec;
+        const tempoTotale = p.storia[psIdx].tempoCumulativo;
         const minutes = Math.floor(tempoTotale / 60);
         const seconds = tempoTotale % 60;
-        const pos = idx + 1;
+        const pos = p.storia[psIdx].posizione;
         
-        // Dati PS con numeri reali
+        // Dati PS: usa gap e variazione calcolati per OGNI prova
         const psData = {};
         for (let i = 0; i <= psIdx; i++) {
           const numProva = proveReali[i];
-          if (idx === 0) {
-            psData[`ps${i+1}`] = '0.0';
-          } else {
-            const prevTempo = pilotiAttivi[idx - 1].tempo_totale_sec;
-            const gap = tempoTotale - prevTempo;
-            psData[`ps${i+1}`] = `+${gap.toFixed(1)}`;
-          }
-          psData[`ps${i+1}_time`] = p.tempi_ps[`ps${numProva}_time`] || null;
+          // Gap specifico di quella prova (non il totale!)
+          psData[`ps${i+1}`] = p.storia[i]?.gapStr || '--';
+          psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
+          // Variazione specifica di quella prova
+          psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
         }
         
         // PS non ancora corse
         for (let i = psIdx + 1; i < numProve; i++) {
           psData[`ps${i+1}`] = null;
           psData[`ps${i+1}_time`] = null;
+          psData[`var${i+1}`] = null;
         }
         
         return {
@@ -673,30 +729,37 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           classe: p.classe,
           ...psData,
           totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
-          var: posizioniPrecedenti[p.num] ? posizioniPrecedenti[p.num] - pos : 0,
+          var: p.storia[psIdx]?.variazione || 0,  // var globale per compatibilità
           stato: 'attivo'
         };
       });
       
       // Formatta classifica ritirati
       const classificaRitirati = pilotiRitirati.map((p, idx) => {
-        const tempoTotale = p.tempo_totale_sec;
+        const lastCompleted = Object.values(p.storia).filter(s => s.completata).length;
+        const tempoTotale = p.storia[psIdx]?.tempoCumulativo || 0;
         const minutes = Math.floor(tempoTotale / 60);
         const seconds = tempoTotale % 60;
         const posRit = pilotiAttivi.length + idx + 1;
         
-        // Dati PS
+        // Dati PS per ritirati
         const psData = {};
         for (let i = 0; i <= psIdx; i++) {
           const numProva = proveReali[i];
-          psData[`ps${i+1}`] = p.tempi_ps[`ps${numProva}`] ? '+RIT' : 'RIT';
-          psData[`ps${i+1}_time`] = p.tempi_ps[`ps${numProva}_time`] || null;
+          if (p.storia[i]?.completata) {
+            psData[`ps${i+1}`] = p.storia[i]?.gapStr || '+RIT';
+          } else {
+            psData[`ps${i+1}`] = 'RIT';
+          }
+          psData[`ps${i+1}_time`] = p.storia[i]?.tempoProva || null;
+          psData[`var${i+1}`] = p.storia[i]?.variazione || 0;
         }
         
         // PS non ancora corse
         for (let i = psIdx + 1; i < numProve; i++) {
           psData[`ps${i+1}`] = null;
           psData[`ps${i+1}_time`] = null;
+          psData[`var${i+1}`] = null;
         }
         
         return {
@@ -706,7 +769,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           nome: p.nome,
           classe: p.classe,
           ...psData,
-          totale: `RIT (${p.proveCompletate}/${p.proveRichieste})`,
+          totale: `RIT (${lastCompleted}/${proveRichieste})`,
           var: 0,
           stato: 'ritirato'
         };
@@ -714,11 +777,6 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
       
       // Combina classifica
       const classifica = [...classificaAttivi, ...classificaRitirati];
-      
-      // Salva posizioni attuali (solo attivi) per il prossimo snapshot
-      classificaAttivi.forEach(pilot => {
-        posizioniPrecedenti[pilot.num] = pilot.pos;
-      });
       
       snapshots.push({
         step: psIdx + 1,
@@ -728,7 +786,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
       });
     }
     
-    // 7. Ritorna JSON
+    // 9. Ritorna JSON
     res.json({
       manifestazione: evento.nome_evento,
       prove: proveResult.rows.map(p => ({
