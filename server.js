@@ -1346,12 +1346,12 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
     const tempiResult = await pool.query(
       `SELECT t.id, t.id_pilota, t.id_ps, t.tempo_secondi, t.penalita_secondi,
               p.numero_gara, p.nome, p.cognome, p.classe,
-              ps.numero_prova, ps.nome as nome_prova
+              ps.numero_ordine, ps.nome_ps
        FROM tempi t
        JOIN piloti p ON t.id_pilota = p.id
        JOIN prove_speciali ps ON t.id_ps = ps.id
        WHERE ps.id_evento = $1
-       ORDER BY ps.numero_prova, t.tempo_secondi`,
+       ORDER BY ps.numero_ordine, t.tempo_secondi`,
       [id]
     );
     
@@ -1400,12 +1400,12 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
       const tempiResult = await pool.query(
         `SELECT t.id, t.id_pilota, t.id_ps, t.tempo_secondi, t.penalita_secondi,
                 p.numero_gara, p.nome, p.cognome, p.classe,
-                ps.numero_prova, ps.nome as nome_prova
+                ps.numero_ordine, ps.nome_ps
          FROM tempi t
          JOIN piloti p ON t.id_pilota = p.id
          JOIN prove_speciali ps ON t.id_ps = ps.id
          WHERE ps.id_evento = $1
-         ORDER BY ps.numero_prova, t.tempo_secondi`,
+         ORDER BY ps.numero_ordine, t.tempo_secondi`,
         [id]
       );
       
