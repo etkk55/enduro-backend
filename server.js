@@ -1340,7 +1340,6 @@ const simulationState = {};
 // Reset simulazione per un evento
 app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
   const { id } = req.params;
-  const mode = req.query.mode || 'realistic'; // 'realistic' o 'random'
   
   try {
     // Carica TUTTI i tempi dell'evento
@@ -1352,7 +1351,7 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
        JOIN piloti p ON t.id_pilota = p.id
        JOIN prove_speciali ps ON t.id_ps = ps.id
        WHERE ps.id_evento = $1
-       ORDER BY ps.numero_ordine, p.numero_gara`,
+       ORDER BY ps.numero_ordine, t.tempo_secondi`,
       [id]
     );
     
@@ -1360,77 +1359,27 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
       return res.status(404).json({ error: 'Nessun tempo trovato per questo evento' });
     }
     
-    let tempiOrdinati;
-    
-    if (mode === 'random') {
-      // Modalità random (vecchio comportamento)
-      tempiOrdinati = tempiResult.rows
-        .map(t => ({ ...t, sortKey: Math.random() }))
-        .sort((a, b) => a.sortKey - b.sortKey)
-        .map(({ sortKey, ...t }) => t);
-    } else {
-      // Modalità REALISTICA:
-      // 1. Raggruppa per PS
-      // 2. Ordina per numero_gara (ordine partenza)
-      // 3. Applica variazione ±20 posizioni (simula sorpassi in trasferimento)
-      
-      const tempiPerPS = {};
-      tempiResult.rows.forEach(t => {
-        const ps = t.numero_ordine;
-        if (!tempiPerPS[ps]) tempiPerPS[ps] = [];
-        tempiPerPS[ps].push(t);
-      });
-      
-      tempiOrdinati = [];
-      const variazioneMax = 20; // Piloti possono mischiarsi di ±20 posizioni
-      
-      // Per ogni PS in ordine
-      Object.keys(tempiPerPS)
-        .sort((a, b) => parseInt(a) - parseInt(b))
-        .forEach(ps => {
-          let tempiPS = tempiPerPS[ps];
-          
-          // Ordina per numero_gara (ordine partenza base)
-          tempiPS.sort((a, b) => a.numero_gara - b.numero_gara);
-          
-          // Applica variazione realistica: ogni pilota può spostarsi di ±20 posizioni
-          tempiPS = tempiPS.map((t, idx) => ({
-            ...t,
-            ordineOriginale: idx,
-            variazione: Math.floor(Math.random() * (variazioneMax * 2 + 1)) - variazioneMax
-          }));
-          
-          // Riordina con la variazione, ma limitata al range realistico
-          tempiPS.sort((a, b) => {
-            const posA = a.ordineOriginale + a.variazione;
-            const posB = b.ordineOriginale + b.variazione;
-            return posA - posB;
-          });
-          
-          // Rimuovi campi temporanei e aggiungi alla lista finale
-          tempiPS.forEach(({ ordineOriginale, variazione, ...t }) => {
-            tempiOrdinati.push(t);
-          });
-        });
-    }
+    // Mescola i tempi in ordine casuale (simula arrivo random)
+    const tempiShuffled = tempiResult.rows
+      .map(t => ({ ...t, sortKey: Math.random() }))
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .map(({ sortKey, ...t }) => t);
     
     // Salva stato simulazione
     simulationState[id] = {
-      tempiTotali: tempiOrdinati,
+      tempiTotali: tempiShuffled,
       tempiRilasciati: [],
       indiceCorrente: 0,
       inizioSimulazione: new Date(),
-      ultimoPolling: null,
-      mode: mode
+      ultimoPolling: null
     };
     
     res.json({
       success: true,
-      message: `Simulazione resettata (mode: ${mode})`,
-      mode: mode,
-      tempiTotali: tempiOrdinati.length,
+      message: 'Simulazione resettata',
+      tempiTotali: tempiShuffled.length,
       tempiRilasciati: 0,
-      tempiRimanenti: tempiOrdinati.length
+      tempiRimanenti: tempiShuffled.length
     });
     
   } catch (error) {
@@ -1443,12 +1392,11 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
 app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
   const { id } = req.params;
   const batchSize = parseInt(req.query.batch) || 15; // Default 15 tempi per batch
-  const mode = req.query.mode || 'realistic'; // 'realistic' o 'random'
   
   try {
     // Se non c'è simulazione attiva, la inizializza
     if (!simulationState[id]) {
-      // Auto-reset con modalità realistica
+      // Auto-reset
       const tempiResult = await pool.query(
         `SELECT t.id, t.id_pilota, t.id_ps, t.tempo_secondi, t.penalita_secondi,
                 p.numero_gara, p.nome, p.cognome, p.classe,
@@ -1457,7 +1405,7 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
          JOIN piloti p ON t.id_pilota = p.id
          JOIN prove_speciali ps ON t.id_ps = ps.id
          WHERE ps.id_evento = $1
-         ORDER BY ps.numero_ordine, p.numero_gara`,
+         ORDER BY ps.numero_ordine, t.tempo_secondi`,
         [id]
       );
       
@@ -1472,56 +1420,17 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
         });
       }
       
-      let tempiOrdinati;
-      
-      if (mode === 'random') {
-        tempiOrdinati = tempiResult.rows
-          .map(t => ({ ...t, sortKey: Math.random() }))
-          .sort((a, b) => a.sortKey - b.sortKey)
-          .map(({ sortKey, ...t }) => t);
-      } else {
-        // Modalità REALISTICA
-        const tempiPerPS = {};
-        tempiResult.rows.forEach(t => {
-          const ps = t.numero_ordine;
-          if (!tempiPerPS[ps]) tempiPerPS[ps] = [];
-          tempiPerPS[ps].push(t);
-        });
-        
-        tempiOrdinati = [];
-        const variazioneMax = 20;
-        
-        Object.keys(tempiPerPS)
-          .sort((a, b) => parseInt(a) - parseInt(b))
-          .forEach(ps => {
-            let tempiPS = tempiPerPS[ps];
-            tempiPS.sort((a, b) => a.numero_gara - b.numero_gara);
-            
-            tempiPS = tempiPS.map((t, idx) => ({
-              ...t,
-              ordineOriginale: idx,
-              variazione: Math.floor(Math.random() * (variazioneMax * 2 + 1)) - variazioneMax
-            }));
-            
-            tempiPS.sort((a, b) => {
-              const posA = a.ordineOriginale + a.variazione;
-              const posB = b.ordineOriginale + b.variazione;
-              return posA - posB;
-            });
-            
-            tempiPS.forEach(({ ordineOriginale, variazione, ...t }) => {
-              tempiOrdinati.push(t);
-            });
-          });
-      }
+      const tempiShuffled = tempiResult.rows
+        .map(t => ({ ...t, sortKey: Math.random() }))
+        .sort((a, b) => a.sortKey - b.sortKey)
+        .map(({ sortKey, ...t }) => t);
       
       simulationState[id] = {
-        tempiTotali: tempiOrdinati,
+        tempiTotali: tempiShuffled,
         tempiRilasciati: [],
         indiceCorrente: 0,
         inizioSimulazione: new Date(),
-        ultimoPolling: null,
-        mode: mode
+        ultimoPolling: null
       };
     }
     
@@ -1546,7 +1455,6 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
     res.json({
       success: true,
       nuoviTempi: nuoviTempi,
-      mode: state.mode || 'realistic',
       tempiTotali: state.tempiTotali.length,
       tempiRilasciati: state.tempiRilasciati.length,
       tempiRimanenti: state.tempiTotali.length - state.indiceCorrente,
