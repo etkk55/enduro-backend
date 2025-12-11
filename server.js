@@ -741,6 +741,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           cognome: p.cognome,
           nome: p.nome,
           classe: p.classe,
+          moto: p.moto,
           ...psData,
           totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
           var: p.storia[psIdx]?.variazione || 0,  // var globale per compatibilità
@@ -785,6 +786,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           cognome: p.cognome,
           nome: p.nome,
           classe: p.classe,
+          moto: p.moto,
           ...psData,
           totale: `RIT (${lastCompleted}/${proveRichieste})`,
           var: 0,
