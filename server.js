@@ -6,6 +6,7 @@ const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+const FICR_BASE_URL = process.env.FICR_URL || 'https://apienduro.ficr.it';
 
 // CORS - Allow all origins
 app.use(cors());
@@ -314,7 +315,7 @@ app.get('/api/eventi/:id_evento/classifica', async (req, res) => {
 // GET lista manifestazioni FICR
 app.get('/api/ficr/manifestazioni', async (req, res) => {
   try {
-    const url = 'https://apienduro.ficr.it/END/mpcache-5/get/manilista/2025';
+    const url = `${FICR_BASE_URL}/END/mpcache-5/get/manilista/2025`;
     const response = await axios.get(url);
     res.json(response.data);
   } catch (err) {
@@ -327,7 +328,7 @@ app.post('/api/ficr/import-piloti', async (req, res) => {
   try {
     const { id_evento, anno, id_manif, id_prova, giorno_prova } = req.body;
     
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/iscbycog/${anno}/${id_manif}/${id_prova}/${giorno_prova}/*/1`;
+    const url = `${FICR_BASE_URL}/END/mpcache-5/get/iscbycog/${anno}/${id_manif}/${id_prova}/${giorno_prova}/*/1`;
     const response = await axios.get(url);
     
     if (!response.data?.data?.iscrdella) {
@@ -395,7 +396,7 @@ app.post('/api/ficr/import-tempi', async (req, res) => {
   try {
     const { id_ps, anno, id_manif, id_prova, giorno_prova, numero_prova } = req.body;
     
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${id_manif}/${id_prova}/${giorno_prova}/${numero_prova}/1/*/*/*/*/*`;
+    const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${anno}/${id_manif}/${id_prova}/${giorno_prova}/${numero_prova}/1/*/*/*/*/*`;
     const response = await axios.get(url);
     
     if (!response.data?.data?.clasdella) {
@@ -478,7 +479,7 @@ app.get('/api/import-piloti-isola', async (req, res) => {
     let totaleAggiornati = 0;
     
     for (const evento of EVENTI) {
-      const url = 'https://apienduro.ficr.it/END/mpcache-5/get/iscbycog/2025/99/11/1/*/1';
+      const url = `${FICR_BASE_URL}/END/mpcache-5/get/iscbycog/2025/99/11/1/*/1`;
       const response = await axios.get(url);
       
       if (!response.data?.data?.iscrdella) continue;
@@ -874,7 +875,7 @@ app.get('/api/import-tempi-isola-campionato', async (req, res) => {
       const id_ps = provaResult.rows[0].id;
       
       // Import da FICR
-      const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/2025/99/11/1/${numeroProva}/1/*/*/*/*/*`;
+      const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/2025/99/11/1/${numeroProva}/1/*/*/*/*/*`;
       const response = await axios.get(url);
       
       if (!response.data?.data?.clasdella) continue;
@@ -970,7 +971,7 @@ app.get('/api/import-tempi-isola/:tipo_gara', async (req, res) => {
       }
       
       const id_ps = provaResult.rows[0].id;
-      const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/2025/99/11/1/${numeroProva}/1/*/*/*/*/*`;
+      const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/2025/99/11/1/${numeroProva}/1/*/*/*/*/*`;
       
       try {
         const response = await axios.get(url);
@@ -1053,7 +1054,7 @@ app.get('/api/ficr/manifestazioni', async (req, res) => {
   try {
     const anno = req.query.anno || new Date().getFullYear();
     
-    const url = `https://apienduro.ficr.it/END/mpcache-30/get/schedule/${anno}/*/*`;
+    const url = `${FICR_BASE_URL}/END/mpcache-30/get/schedule/${anno}/*/*`;
     const response = await axios.get(url);
     
     // Estrai array data se presente
@@ -1090,7 +1091,7 @@ app.post('/api/import-ficr', async (req, res) => {
     // GARA = categoria richiesta (1=Campionato, 2=Training, 3=Epoca, etc.)
     // PROVA = 2 (sempre la prima prova cronometrata, 1 è controllo orario)
     // CATEGORIA = 1 (tutte le categorie piloti)
-    const url = `https://apienduro.ficr.it/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/2/1/*/*/*/*/*`;
+    const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/2/1/*/*/*/*/*`;
     
     console.log(`[IMPORT] Chiamata FICR CLASPS 2025: ${url}`);
     console.log(`[IMPORT] Gara richiesta: ${categoria}`);
