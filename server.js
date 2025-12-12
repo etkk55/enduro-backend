@@ -198,7 +198,7 @@ app.post('/api/prove', async (req, res) => {
   try {
     const { nome_ps, numero_ordine, id_evento, stato } = req.body;
     const result = await pool.query(
-      'INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato) VALUES ($1, $2, $3, $4) ON CONFLICT (id_pilota, id_ps) DO UPDATE SET tempo_secondi = $3, penalita_secondi = $4 RETURNING *',
+      'INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato) VALUES ($1, $2, $3, $4) RETURNING *',
       [nome_ps, numero_ordine, id_evento, stato || 'non_iniziata']
     );
     res.status(201).json(result.rows[0]);
@@ -212,7 +212,7 @@ app.post('/api/prove-speciali', async (req, res) => {
   try {
     const { nome_ps, numero_ordine, id_evento, stato } = req.body;
     const result = await pool.query(
-      'INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato) VALUES ($1, $2, $3, $4) ON CONFLICT (id_pilota, id_ps) DO UPDATE SET tempo_secondi = $3, penalita_secondi = $4 RETURNING *',
+      'INSERT INTO prove_speciali (nome_ps, numero_ordine, id_evento, stato) VALUES ($1, $2, $3, $4) RETURNING *',
       [nome_ps, numero_ordine, id_evento, stato || 'non_iniziata']
     );
     res.status(201).json(result.rows[0]);
