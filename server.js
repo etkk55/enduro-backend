@@ -1089,9 +1089,9 @@ app.post('/api/import-ficr', async (req, res) => {
     // API CLASPS - Sistema STANDARD Triveneto
     // URL: /clasps/ANNO/EQUIPE/MANIFESTAZIONE/GARA/PROVA/CATEGORIA/*/*/*/*/*
     // GARA = categoria richiesta (1=Campionato, 2=Training, 3=Epoca, etc.)
-    // PROVA = 2 (sempre la prima prova cronometrata, 1 è controllo orario)
+    // PROVA = numero prova da importare (2, 4, 6, etc. - i numeri dispari sono controlli orario)
     // CATEGORIA = 1 (tutte le categorie piloti)
-    const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/2/1/*/*/*/*/*`;
+    const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${anno}/${codiceEquipe}/${manifestazione}/${categoria}/${prova}/1/*/*/*/*/*`;
     
     console.log(`[IMPORT] Chiamata FICR CLASPS 2025: ${url}`);
     console.log(`[IMPORT] Gara richiesta: ${categoria}`);
