@@ -554,7 +554,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
     
     // 2. Recupera piloti
     const pilotiResult = await pool.query(
-      'SELECT id, numero_gara, nome, cognome, classe, moto FROM piloti WHERE id_evento = $1 ORDER BY numero_gara',
+      'SELECT id, numero_gara, nome, cognome, classe, moto, team FROM piloti WHERE id_evento = $1 ORDER BY numero_gara',
       [id_evento]
     );
     
@@ -626,6 +626,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
         cognome: p.cognome,
         classe: p.classe || '',
         moto: p.moto || '',
+        team: p.team || '',
         storia,
         totalProveCompletate: proveCompletate
       };
@@ -743,6 +744,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           nome: p.nome,
           classe: p.classe,
           moto: p.moto,
+          team: p.team,
           ...psData,
           totale: `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`,
           var: p.storia[psIdx]?.variazione || 0,  // var globale per compatibilità
@@ -788,6 +790,7 @@ app.get('/api/eventi/:id_evento/export-replay', async (req, res) => {
           nome: p.nome,
           classe: p.classe,
           moto: p.moto,
+          team: p.team,
           ...psData,
           totale: `RIT (${lastCompleted}/${proveRichieste})`,
           var: 0,
