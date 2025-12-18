@@ -57,6 +57,25 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Migrazione codice_accesso ERTA completata');
+      
+      // NUOVO Chat 20: Tabella messaggi_piloti per comunicazione bidirezionale
+      return pool.query(`
+        CREATE TABLE IF NOT EXISTS messaggi_piloti (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          codice_gara VARCHAR(50) NOT NULL,
+          numero_pilota INTEGER NOT NULL,
+          tipo VARCHAR(20) NOT NULL DEFAULT 'messaggio',
+          testo TEXT,
+          gps_lat DECIMAL(10, 8),
+          gps_lon DECIMAL(11, 8),
+          letto BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_messaggi_codice_gara ON messaggi_piloti(codice_gara);
+        CREATE INDEX IF NOT EXISTS idx_messaggi_tipo ON messaggi_piloti(tipo);
+      `);
+    }).then(() => {
+      console.log('Tabella messaggi_piloti creata');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -1817,6 +1836,189 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
 
 // ============================================
 // FINE API APP ERTA
+// ============================================
+
+// ============================================
+// NUOVO Chat 20: API BIDIREZIONALE - MESSAGGI PILOTI → DDG
+// ============================================
+
+// 1. SOS/EMERGENZA - Pilota invia emergenza
+app.post('/api/app/sos', async (req, res) => {
+  try {
+    const { codice_accesso, numero_pilota, testo, gps_lat, gps_lon } = req.body;
+    
+    if (!codice_accesso || !numero_pilota) {
+      return res.status(400).json({ success: false, error: 'Dati mancanti' });
+    }
+    
+    // Trova evento
+    const eventoResult = await pool.query(
+      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      [codice_accesso.toUpperCase()]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice gara non valido' });
+    }
+    
+    const codice_gara = eventoResult.rows[0].codice_gara;
+    
+    // Inserisci emergenza
+    const result = await pool.query(
+      `INSERT INTO messaggi_piloti (codice_gara, numero_pilota, tipo, testo, gps_lat, gps_lon)
+       VALUES ($1, $2, 'sos', $3, $4, $5)
+       RETURNING *`,
+      [codice_gara, parseInt(numero_pilota), testo || 'EMERGENZA SOS', gps_lat || null, gps_lon || null]
+    );
+    
+    console.log(`🆘 SOS RICEVUTO: Pilota #${numero_pilota} - Gara ${codice_gara}`);
+    
+    res.json({ 
+      success: true, 
+      messaggio: result.rows[0],
+      alert: 'SOS inviato alla Direzione Gara'
+    });
+  } catch (err) {
+    console.error('[POST /api/app/sos] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore invio SOS' });
+  }
+});
+
+// 2. MESSAGGIO - Pilota invia messaggio normale
+app.post('/api/app/messaggio', async (req, res) => {
+  try {
+    const { codice_accesso, numero_pilota, tipo, testo, gps_lat, gps_lon } = req.body;
+    
+    if (!codice_accesso || !numero_pilota || !testo) {
+      return res.status(400).json({ success: false, error: 'Dati mancanti' });
+    }
+    
+    // Trova evento
+    const eventoResult = await pool.query(
+      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      [codice_accesso.toUpperCase()]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice gara non valido' });
+    }
+    
+    const codice_gara = eventoResult.rows[0].codice_gara;
+    
+    // Tipi validi: assistenza, pericolo, info, altro
+    const tipoValido = ['assistenza', 'pericolo', 'info', 'altro'].includes(tipo) ? tipo : 'altro';
+    
+    // Inserisci messaggio
+    const result = await pool.query(
+      `INSERT INTO messaggi_piloti (codice_gara, numero_pilota, tipo, testo, gps_lat, gps_lon)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [codice_gara, parseInt(numero_pilota), tipoValido, testo, gps_lat || null, gps_lon || null]
+    );
+    
+    console.log(`📝 Messaggio ricevuto: Pilota #${numero_pilota} - Tipo: ${tipoValido}`);
+    
+    res.json({ 
+      success: true, 
+      messaggio: result.rows[0],
+      alert: 'Messaggio inviato alla Direzione Gara'
+    });
+  } catch (err) {
+    console.error('[POST /api/app/messaggio] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore invio messaggio' });
+  }
+});
+
+// 3. LISTA MESSAGGI - Per pannello admin DdG
+app.get('/api/messaggi-piloti/:codice_gara', async (req, res) => {
+  try {
+    const { codice_gara } = req.params;
+    const { solo_non_letti, tipo } = req.query;
+    
+    let query = `
+      SELECT mp.*, p.nome, p.cognome, p.classe, p.moto
+      FROM messaggi_piloti mp
+      LEFT JOIN piloti p ON mp.numero_pilota = p.numero_gara 
+        AND p.id_evento = (SELECT id FROM eventi WHERE codice_gara = $1 LIMIT 1)
+      WHERE mp.codice_gara = $1
+    `;
+    const params = [codice_gara];
+    
+    if (solo_non_letti === 'true') {
+      query += ' AND mp.letto = FALSE';
+    }
+    
+    if (tipo) {
+      query += ` AND mp.tipo = $${params.length + 1}`;
+      params.push(tipo);
+    }
+    
+    query += ' ORDER BY mp.created_at DESC';
+    
+    const result = await pool.query(query, params);
+    
+    // Conta non letti e SOS
+    const countResult = await pool.query(
+      `SELECT 
+        COUNT(*) FILTER (WHERE letto = FALSE) as non_letti,
+        COUNT(*) FILTER (WHERE tipo = 'sos' AND letto = FALSE) as sos_attivi
+       FROM messaggi_piloti WHERE codice_gara = $1`,
+      [codice_gara]
+    );
+    
+    res.json({
+      success: true,
+      messaggi: result.rows,
+      totale: result.rows.length,
+      non_letti: parseInt(countResult.rows[0].non_letti),
+      sos_attivi: parseInt(countResult.rows[0].sos_attivi)
+    });
+  } catch (err) {
+    console.error('[GET /api/messaggi-piloti] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore recupero messaggi' });
+  }
+});
+
+// 4. SEGNA COME LETTO
+app.put('/api/messaggi-piloti/:id/letto', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'UPDATE messaggi_piloti SET letto = TRUE WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Messaggio non trovato' });
+    }
+    
+    res.json({ success: true, messaggio: result.rows[0] });
+  } catch (err) {
+    console.error('[PUT /api/messaggi-piloti/letto] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore aggiornamento' });
+  }
+});
+
+// 5. SEGNA TUTTI COME LETTI
+app.put('/api/messaggi-piloti/:codice_gara/letti-tutti', async (req, res) => {
+  try {
+    const { codice_gara } = req.params;
+    
+    await pool.query(
+      'UPDATE messaggi_piloti SET letto = TRUE WHERE codice_gara = $1',
+      [codice_gara]
+    );
+    
+    res.json({ success: true, message: 'Tutti i messaggi segnati come letti' });
+  } catch (err) {
+    console.error('[PUT /api/messaggi-piloti/letti-tutti] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore aggiornamento' });
+  }
+});
+
+// ============================================
+// FINE API BIDIREZIONALE
 // ============================================
 
 app.listen(PORT, () => {
