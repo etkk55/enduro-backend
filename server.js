@@ -76,6 +76,22 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Tabella messaggi_piloti creata');
+      
+      // NUOVO Chat 20: Tabella squadre per confronto classifiche
+      return pool.query(`
+        CREATE TABLE IF NOT EXISTS squadre (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          codice_gara VARCHAR(50) NOT NULL,
+          nome_squadra VARCHAR(100) NOT NULL,
+          creatore_numero INTEGER NOT NULL,
+          membri INTEGER[] DEFAULT '{}',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_squadre_codice_gara ON squadre(codice_gara);
+        CREATE INDEX IF NOT EXISTS idx_squadre_creatore ON squadre(creatore_numero);
+      `);
+    }).then(() => {
+      console.log('Tabella squadre creata');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -2019,6 +2035,336 @@ app.put('/api/messaggi-piloti/:codice_gara/letti-tutti', async (req, res) => {
 
 // ============================================
 // FINE API BIDIREZIONALE
+// ============================================
+
+// ============================================
+// NUOVO Chat 20: API SQUADRE
+// ============================================
+
+// 1. CREA SQUADRA
+app.post('/api/app/squadra', async (req, res) => {
+  try {
+    const { codice_accesso, numero_pilota, nome_squadra, membri } = req.body;
+    
+    if (!codice_accesso || !numero_pilota || !nome_squadra) {
+      return res.status(400).json({ success: false, error: 'Dati mancanti' });
+    }
+    
+    // Trova evento
+    const eventoResult = await pool.query(
+      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      [codice_accesso.toUpperCase()]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice gara non valido' });
+    }
+    
+    const codice_gara = eventoResult.rows[0].codice_gara;
+    
+    // Verifica se il pilota ha già una squadra
+    const esistente = await pool.query(
+      `SELECT id FROM squadre WHERE codice_gara = $1 AND (creatore_numero = $2 OR $2 = ANY(membri))`,
+      [codice_gara, parseInt(numero_pilota)]
+    );
+    
+    if (esistente.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'Sei già in una squadra' });
+    }
+    
+    // Prepara membri (array di numeri, include creatore)
+    let membriArray = [parseInt(numero_pilota)];
+    if (membri && Array.isArray(membri)) {
+      membri.forEach(m => {
+        const num = parseInt(m);
+        if (num && !membriArray.includes(num)) {
+          membriArray.push(num);
+        }
+      });
+    }
+    
+    // Crea squadra
+    const result = await pool.query(
+      `INSERT INTO squadre (codice_gara, nome_squadra, creatore_numero, membri)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [codice_gara, nome_squadra, parseInt(numero_pilota), membriArray]
+    );
+    
+    console.log(`👥 Squadra creata: ${nome_squadra} - ${membriArray.length} membri`);
+    
+    res.json({ 
+      success: true, 
+      squadra: result.rows[0]
+    });
+  } catch (err) {
+    console.error('[POST /api/app/squadra] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore creazione squadra' });
+  }
+});
+
+// 2. OTTIENI SQUADRA DEL PILOTA
+app.get('/api/app/squadra/:codice_accesso/:numero_pilota', async (req, res) => {
+  try {
+    const { codice_accesso, numero_pilota } = req.params;
+    
+    // Trova evento
+    const eventoResult = await pool.query(
+      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      [codice_accesso.toUpperCase()]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice gara non valido' });
+    }
+    
+    const codice_gara = eventoResult.rows[0].codice_gara;
+    const numero = parseInt(numero_pilota);
+    
+    // Cerca squadra dove il pilota è creatore o membro
+    const result = await pool.query(
+      `SELECT * FROM squadre 
+       WHERE codice_gara = $1 AND (creatore_numero = $2 OR $2 = ANY(membri))`,
+      [codice_gara, numero]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.json({ success: true, squadra: null });
+    }
+    
+    const squadra = result.rows[0];
+    
+    // Ottieni info piloti membri
+    const pilotiResult = await pool.query(
+      `SELECT numero_gara, nome, cognome, classe, moto 
+       FROM piloti 
+       WHERE id_evento = (SELECT id FROM eventi WHERE codice_gara = $1 LIMIT 1)
+       AND numero_gara = ANY($2)`,
+      [codice_gara, squadra.membri]
+    );
+    
+    res.json({
+      success: true,
+      squadra: {
+        ...squadra,
+        piloti: pilotiResult.rows
+      }
+    });
+  } catch (err) {
+    console.error('[GET /api/app/squadra] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore recupero squadra' });
+  }
+});
+
+// 3. AGGIUNGI MEMBRO A SQUADRA
+app.put('/api/app/squadra/:id/aggiungi', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { numero_pilota } = req.body;
+    
+    if (!numero_pilota) {
+      return res.status(400).json({ success: false, error: 'Numero pilota mancante' });
+    }
+    
+    const numero = parseInt(numero_pilota);
+    
+    // Verifica che il pilota non sia già in un'altra squadra
+    const squadraResult = await pool.query('SELECT * FROM squadre WHERE id = $1', [id]);
+    if (squadraResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Squadra non trovata' });
+    }
+    
+    const squadra = squadraResult.rows[0];
+    
+    // Verifica se pilota esiste nella gara
+    const pilotaResult = await pool.query(
+      `SELECT numero_gara FROM piloti 
+       WHERE id_evento = (SELECT id FROM eventi WHERE codice_gara = $1 LIMIT 1)
+       AND numero_gara = $2`,
+      [squadra.codice_gara, numero]
+    );
+    
+    if (pilotaResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Pilota non trovato in questa gara' });
+    }
+    
+    // Verifica se già in altra squadra
+    const altraSquadra = await pool.query(
+      `SELECT id FROM squadre WHERE codice_gara = $1 AND id != $2 AND $3 = ANY(membri)`,
+      [squadra.codice_gara, id, numero]
+    );
+    
+    if (altraSquadra.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'Il pilota è già in un\'altra squadra' });
+    }
+    
+    // Aggiungi membro
+    const result = await pool.query(
+      `UPDATE squadre SET membri = array_append(membri, $1) WHERE id = $2 AND NOT ($1 = ANY(membri)) RETURNING *`,
+      [numero, id]
+    );
+    
+    res.json({ success: true, squadra: result.rows[0] });
+  } catch (err) {
+    console.error('[PUT /api/app/squadra/aggiungi] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore aggiunta membro' });
+  }
+});
+
+// 4. RIMUOVI MEMBRO DA SQUADRA
+app.put('/api/app/squadra/:id/rimuovi', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { numero_pilota } = req.body;
+    
+    const numero = parseInt(numero_pilota);
+    
+    // Verifica che non sia il creatore
+    const squadraResult = await pool.query('SELECT * FROM squadre WHERE id = $1', [id]);
+    if (squadraResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Squadra non trovata' });
+    }
+    
+    if (squadraResult.rows[0].creatore_numero === numero) {
+      return res.status(400).json({ success: false, error: 'Il creatore non può essere rimosso' });
+    }
+    
+    // Rimuovi membro
+    const result = await pool.query(
+      `UPDATE squadre SET membri = array_remove(membri, $1) WHERE id = $2 RETURNING *`,
+      [numero, id]
+    );
+    
+    res.json({ success: true, squadra: result.rows[0] });
+  } catch (err) {
+    console.error('[PUT /api/app/squadra/rimuovi] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore rimozione membro' });
+  }
+});
+
+// 5. CLASSIFICA SQUADRA (tempi e posizioni dei membri)
+app.get('/api/app/squadra/:id/classifica', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Ottieni squadra
+    const squadraResult = await pool.query('SELECT * FROM squadre WHERE id = $1', [id]);
+    if (squadraResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Squadra non trovata' });
+    }
+    
+    const squadra = squadraResult.rows[0];
+    const codice_gara = squadra.codice_gara;
+    
+    // Ottieni evento ID
+    const eventoResult = await pool.query(
+      'SELECT id FROM eventi WHERE codice_gara = $1',
+      [codice_gara]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Evento non trovato' });
+    }
+    
+    const eventoId = eventoResult.rows[0].id;
+    
+    // Ottieni classifica completa per calcolare posizioni
+    const classificaResult = await pool.query(`
+      SELECT 
+        p.numero_gara,
+        p.nome,
+        p.cognome,
+        p.classe,
+        p.moto,
+        COALESCE(SUM(t.tempo_secondi), 0) + COALESCE(SUM(t.penalita_secondi), 0) as tempo_totale
+      FROM piloti p
+      LEFT JOIN tempi t ON p.id = t.id_pilota
+      WHERE p.id_evento = $1
+      GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
+      ORDER BY tempo_totale ASC
+    `, [eventoId]);
+    
+    // Calcola posizioni assolute
+    let posizione = 0;
+    const classificaConPosizioni = classificaResult.rows.map((row, idx) => {
+      posizione = idx + 1;
+      return { ...row, posizione_assoluta: posizione };
+    });
+    
+    // Filtra solo membri squadra
+    const membriClassifica = classificaConPosizioni.filter(p => 
+      squadra.membri.includes(p.numero_gara)
+    );
+    
+    // Aggiungi posizione in squadra
+    membriClassifica.sort((a, b) => a.tempo_totale - b.tempo_totale);
+    membriClassifica.forEach((m, idx) => {
+      m.posizione_squadra = idx + 1;
+    });
+    
+    // Formatta tempi
+    membriClassifica.forEach(m => {
+      const tot = m.tempo_totale;
+      const min = Math.floor(tot / 60);
+      const sec = Math.floor(tot % 60);
+      const cent = Math.round((tot % 1) * 100);
+      m.tempo_formattato = `${min}:${sec.toString().padStart(2, '0')}.${cent.toString().padStart(2, '0')}`;
+      
+      // Gap dal primo della squadra
+      if (m.posizione_squadra > 1) {
+        const gap = tot - membriClassifica[0].tempo_totale;
+        const gapMin = Math.floor(gap / 60);
+        const gapSec = (gap % 60).toFixed(2);
+        m.gap = gapMin > 0 ? `+${gapMin}:${parseFloat(gapSec).toFixed(2).padStart(5, '0')}` : `+${parseFloat(gapSec).toFixed(2)}`;
+      } else {
+        m.gap = '';
+      }
+    });
+    
+    res.json({
+      success: true,
+      squadra: {
+        id: squadra.id,
+        nome: squadra.nome_squadra,
+        creatore: squadra.creatore_numero,
+        totale_membri: squadra.membri.length
+      },
+      classifica: membriClassifica,
+      ultimo_aggiornamento: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[GET /api/app/squadra/classifica] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore calcolo classifica' });
+  }
+});
+
+// 6. ELIMINA SQUADRA (solo creatore)
+app.delete('/api/app/squadra/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { numero_pilota } = req.body;
+    
+    // Verifica che sia il creatore
+    const squadraResult = await pool.query('SELECT * FROM squadre WHERE id = $1', [id]);
+    if (squadraResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Squadra non trovata' });
+    }
+    
+    if (squadraResult.rows[0].creatore_numero !== parseInt(numero_pilota)) {
+      return res.status(403).json({ success: false, error: 'Solo il creatore può eliminare la squadra' });
+    }
+    
+    await pool.query('DELETE FROM squadre WHERE id = $1', [id]);
+    
+    res.json({ success: true, message: 'Squadra eliminata' });
+  } catch (err) {
+    console.error('[DELETE /api/app/squadra] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore eliminazione squadra' });
+  }
+});
+
+// ============================================
+// FINE API SQUADRE
 // ============================================
 
 app.listen(PORT, () => {
