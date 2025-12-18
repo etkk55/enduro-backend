@@ -2268,7 +2268,15 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
     
     const eventoId = eventoResult.rows[0].id;
     
-    // Ottieni classifica completa per calcolare posizioni
+    // Ottieni numero prove totali della gara
+    const proveResult = await pool.query(
+      'SELECT DISTINCT numero_prova FROM tempi WHERE id_pilota IN (SELECT id FROM piloti WHERE id_evento = $1) ORDER BY numero_prova',
+      [eventoId]
+    );
+    const numProveTotali = proveResult.rows.length;
+    const listaProve = proveResult.rows.map(r => r.numero_prova);
+    
+    // Ottieni classifica completa con conteggio prove
     const classificaResult = await pool.query(`
       SELECT 
         p.numero_gara,
@@ -2276,49 +2284,134 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
         p.cognome,
         p.classe,
         p.moto,
-        COALESCE(SUM(t.tempo_secondi), 0) + COALESCE(SUM(t.penalita_secondi), 0) as tempo_totale
+        COALESCE(SUM(t.tempo_secondi), 0) + COALESCE(SUM(t.penalita_secondi), 0) as tempo_totale,
+        COUNT(t.id) as prove_completate
       FROM piloti p
       LEFT JOIN tempi t ON p.id = t.id_pilota
       WHERE p.id_evento = $1
       GROUP BY p.id, p.numero_gara, p.nome, p.cognome, p.classe, p.moto
-      ORDER BY tempo_totale ASC
+      HAVING COUNT(t.id) > 0
+      ORDER BY 
+        COUNT(t.id) DESC,
+        tempo_totale ASC
     `, [eventoId]);
     
-    // Calcola posizioni assolute
+    // Calcola posizioni assolute (solo chi ha completato tutte le prove prima)
     let posizione = 0;
     const classificaConPosizioni = classificaResult.rows.map((row, idx) => {
       posizione = idx + 1;
-      return { ...row, posizione_assoluta: posizione };
+      return { 
+        ...row, 
+        posizione_assoluta: posizione,
+        ritirato: parseInt(row.prove_completate) < numProveTotali
+      };
     });
     
     // Filtra solo membri squadra
-    const membriClassifica = classificaConPosizioni.filter(p => 
+    let membriClassifica = classificaConPosizioni.filter(p => 
       squadra.membri.includes(p.numero_gara)
     );
     
-    // Aggiungi posizione in squadra
-    membriClassifica.sort((a, b) => a.tempo_totale - b.tempo_totale);
+    // Ordina: prima chi ha completato tutto, poi per tempo
+    membriClassifica.sort((a, b) => {
+      if (a.ritirato !== b.ritirato) return a.ritirato ? 1 : -1;
+      return a.tempo_totale - b.tempo_totale;
+    });
+    
     membriClassifica.forEach((m, idx) => {
       m.posizione_squadra = idx + 1;
     });
     
-    // Formatta tempi
-    membriClassifica.forEach(m => {
-      const tot = m.tempo_totale;
-      const min = Math.floor(tot / 60);
-      const sec = Math.floor(tot % 60);
-      const cent = Math.round((tot % 1) * 100);
-      m.tempo_formattato = `${min}:${sec.toString().padStart(2, '0')}.${cent.toString().padStart(2, '0')}`;
-      
-      // Gap dal primo della squadra
-      if (m.posizione_squadra > 1) {
-        const gap = tot - membriClassifica[0].tempo_totale;
-        const gapMin = Math.floor(gap / 60);
-        const gapSec = (gap % 60).toFixed(2);
-        m.gap = gapMin > 0 ? `+${gapMin}:${parseFloat(gapSec).toFixed(2).padStart(5, '0')}` : `+${parseFloat(gapSec).toFixed(2)}`;
-      } else {
-        m.gap = '';
+    // Ottieni tempi dettagliati per ogni PS per i membri della squadra
+    const tempiDettagliatiResult = await pool.query(`
+      SELECT 
+        p.numero_gara,
+        t.numero_prova,
+        t.nome_prova,
+        t.tempo_secondi,
+        t.penalita_secondi
+      FROM piloti p
+      JOIN tempi t ON p.id = t.id_pilota
+      WHERE p.id_evento = $1 AND p.numero_gara = ANY($2)
+      ORDER BY p.numero_gara, t.numero_prova
+    `, [eventoId, squadra.membri]);
+    
+    // Organizza tempi per pilota
+    const tempiPerPilota = {};
+    tempiDettagliatiResult.rows.forEach(t => {
+      if (!tempiPerPilota[t.numero_gara]) {
+        tempiPerPilota[t.numero_gara] = {};
       }
+      const tempoTot = parseFloat(t.tempo_secondi) + parseFloat(t.penalita_secondi || 0);
+      tempiPerPilota[t.numero_gara][t.numero_prova] = {
+        tempo: tempoTot,
+        nome_prova: t.nome_prova
+      };
+    });
+    
+    // Calcola miglior tempo per ogni PS (per evidenziare il migliore)
+    const migliorTempoPS = {};
+    listaProve.forEach(ps => {
+      let minTempo = Infinity;
+      squadra.membri.forEach(num => {
+        if (tempiPerPilota[num] && tempiPerPilota[num][ps]) {
+          if (tempiPerPilota[num][ps].tempo < minTempo) {
+            minTempo = tempiPerPilota[num][ps].tempo;
+          }
+        }
+      });
+      migliorTempoPS[ps] = minTempo;
+    });
+    
+    // Helper per formattare tempo
+    const formatTempo = (sec) => {
+      if (!sec || sec === 0) return '--';
+      const min = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      const cent = Math.round((sec % 1) * 100);
+      return `${min}:${s.toString().padStart(2, '0')}.${cent.toString().padStart(2, '0')}`;
+    };
+    
+    // Formatta tempi e aggiungi dettagli PS
+    membriClassifica.forEach(m => {
+      const tot = parseFloat(m.tempo_totale);
+      m.tempo_formattato = formatTempo(tot);
+      m.prove_completate = parseInt(m.prove_completate);
+      m.prove_totali = numProveTotali;
+      
+      // Gap dal primo della squadra (non ritirato)
+      const primoNonRitirato = membriClassifica.find(x => !x.ritirato);
+      if (m.posizione_squadra > 1 && primoNonRitirato && !m.ritirato) {
+        const gap = tot - parseFloat(primoNonRitirato.tempo_totale);
+        m.gap = '+' + formatTempo(gap);
+      } else {
+        m.gap = m.ritirato ? 'RIT' : '';
+      }
+      
+      // Aggiungi tempi per ogni PS
+      m.tempi_ps = {};
+      listaProve.forEach(ps => {
+        if (tempiPerPilota[m.numero_gara] && tempiPerPilota[m.numero_gara][ps]) {
+          const t = tempiPerPilota[m.numero_gara][ps];
+          m.tempi_ps[ps] = {
+            tempo: formatTempo(t.tempo),
+            tempo_raw: t.tempo,
+            nome: t.nome_prova,
+            migliore: t.tempo === migliorTempoPS[ps]
+          };
+        } else {
+          m.tempi_ps[ps] = { tempo: '--', tempo_raw: null, nome: '', migliore: false };
+        }
+      });
+    });
+    
+    // Prepara lista prove con nomi
+    const proveInfo = listaProve.map(ps => {
+      const info = tempiDettagliatiResult.rows.find(r => r.numero_prova === ps);
+      return {
+        numero: ps,
+        nome: info ? info.nome_prova : `PS${ps}`
+      };
     });
     
     res.json({
@@ -2329,11 +2422,12 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
         creatore: squadra.creatore_numero,
         totale_membri: squadra.membri.length
       },
+      prove: proveInfo,
       classifica: membriClassifica,
       ultimo_aggiornamento: new Date().toISOString()
     });
   } catch (err) {
-    console.error('[GET /api/app/squadra/classifica] Error:', err.message);
+    console.error('[GET /api/app/classifica-squadra] Error:', err.message);
     res.status(500).json({ success: false, error: 'Errore calcolo classifica' });
   }
 });
