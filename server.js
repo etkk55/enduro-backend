@@ -2268,13 +2268,13 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
     
     const eventoId = eventoResult.rows[0].id;
     
-    // Ottieni numero prove totali della gara
+    // Ottieni lista prove speciali della gara
     const proveResult = await pool.query(
-      'SELECT DISTINCT numero_prova FROM tempi WHERE id_pilota IN (SELECT id FROM piloti WHERE id_evento = $1) ORDER BY numero_prova',
+      'SELECT id, nome_ps, numero_ordine FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
       [eventoId]
     );
     const numProveTotali = proveResult.rows.length;
-    const listaProve = proveResult.rows.map(r => r.numero_prova);
+    const listaProve = proveResult.rows;
     
     // Ottieni classifica completa con conteggio prove
     const classificaResult = await pool.query(`
@@ -2326,14 +2326,15 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
     const tempiDettagliatiResult = await pool.query(`
       SELECT 
         p.numero_gara,
-        t.numero_prova,
-        t.nome_prova,
+        ps.numero_ordine,
+        ps.nome_ps,
         t.tempo_secondi,
         t.penalita_secondi
       FROM piloti p
       JOIN tempi t ON p.id = t.id_pilota
+      JOIN prove_speciali ps ON t.id_ps = ps.id
       WHERE p.id_evento = $1 AND p.numero_gara = ANY($2)
-      ORDER BY p.numero_gara, t.numero_prova
+      ORDER BY p.numero_gara, ps.numero_ordine
     `, [eventoId, squadra.membri]);
     
     // Organizza tempi per pilota
@@ -2343,9 +2344,9 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
         tempiPerPilota[t.numero_gara] = {};
       }
       const tempoTot = parseFloat(t.tempo_secondi) + parseFloat(t.penalita_secondi || 0);
-      tempiPerPilota[t.numero_gara][t.numero_prova] = {
+      tempiPerPilota[t.numero_gara][t.numero_ordine] = {
         tempo: tempoTot,
-        nome_prova: t.nome_prova
+        nome_prova: t.nome_ps
       };
     });
     
@@ -2354,13 +2355,13 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
     listaProve.forEach(ps => {
       let minTempo = Infinity;
       squadra.membri.forEach(num => {
-        if (tempiPerPilota[num] && tempiPerPilota[num][ps]) {
-          if (tempiPerPilota[num][ps].tempo < minTempo) {
-            minTempo = tempiPerPilota[num][ps].tempo;
+        if (tempiPerPilota[num] && tempiPerPilota[num][ps.numero_ordine]) {
+          if (tempiPerPilota[num][ps.numero_ordine].tempo < minTempo) {
+            minTempo = tempiPerPilota[num][ps.numero_ordine].tempo;
           }
         }
       });
-      migliorTempoPS[ps] = minTempo;
+      migliorTempoPS[ps.numero_ordine] = minTempo;
     });
     
     // Helper per formattare tempo
@@ -2391,28 +2392,25 @@ app.get('/api/app/classifica-squadra/:id', async (req, res) => {
       // Aggiungi tempi per ogni PS
       m.tempi_ps = {};
       listaProve.forEach(ps => {
-        if (tempiPerPilota[m.numero_gara] && tempiPerPilota[m.numero_gara][ps]) {
-          const t = tempiPerPilota[m.numero_gara][ps];
-          m.tempi_ps[ps] = {
+        if (tempiPerPilota[m.numero_gara] && tempiPerPilota[m.numero_gara][ps.numero_ordine]) {
+          const t = tempiPerPilota[m.numero_gara][ps.numero_ordine];
+          m.tempi_ps[ps.numero_ordine] = {
             tempo: formatTempo(t.tempo),
             tempo_raw: t.tempo,
             nome: t.nome_prova,
-            migliore: t.tempo === migliorTempoPS[ps]
+            migliore: t.tempo === migliorTempoPS[ps.numero_ordine]
           };
         } else {
-          m.tempi_ps[ps] = { tempo: '--', tempo_raw: null, nome: '', migliore: false };
+          m.tempi_ps[ps.numero_ordine] = { tempo: '--', tempo_raw: null, nome: '', migliore: false };
         }
       });
     });
     
     // Prepara lista prove con nomi
-    const proveInfo = listaProve.map(ps => {
-      const info = tempiDettagliatiResult.rows.find(r => r.numero_prova === ps);
-      return {
-        numero: ps,
-        nome: info ? info.nome_prova : `PS${ps}`
-      };
-    });
+    const proveInfo = listaProve.map(ps => ({
+      numero: ps.numero_ordine,
+      nome: ps.nome_ps || `PS${ps.numero_ordine}`
+    }));
     
     res.json({
       success: true,
