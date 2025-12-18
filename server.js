@@ -2243,7 +2243,7 @@ app.put('/api/app/squadra/:id/rimuovi', async (req, res) => {
 });
 
 // 5. CLASSIFICA SQUADRA (tempi e posizioni dei membri)
-app.get('/api/app/squadra/:id/classifica', async (req, res) => {
+app.get('/api/app/classifica-squadra/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
