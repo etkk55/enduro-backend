@@ -1858,7 +1858,10 @@ app.post('/api/app/login', async (req, res) => {
         nome: evento.nome_evento,
         codice_gara: evento.codice_gara,
         data: evento.data_inizio,
-        luogo: evento.luogo
+        luogo: evento.luogo,
+        // NUOVO Chat 21: Parametri GPS
+        gps_frequenza: evento.gps_frequenza || 30,
+        allarme_fermo_minuti: evento.allarme_fermo_minuti || 10
       }
     });
   } catch (err) {
