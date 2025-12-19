@@ -2842,6 +2842,162 @@ app.delete('/api/app/squadra/:id', async (req, res) => {
 });
 
 // ============================================
+// DASHBOARD DDG MULTI-EVENTO
+// ============================================
+
+// Endpoint che restituisce SOS, piloti fermi e posizioni per tutti gli eventi "fratelli"
+// (stesso prefisso codice_gara, es. 303-1, 303-2, 303-3)
+app.get('/api/ddg/multi/:codice_gara', async (req, res) => {
+  try {
+    const { codice_gara } = req.params;
+    
+    // Estrai prefisso (tutto prima del trattino, es. "303" da "303-1")
+    const prefisso = codice_gara.split('-')[0];
+    
+    // Trova tutti gli eventi con lo stesso prefisso
+    const eventiResult = await pool.query(
+      `SELECT id, codice_gara, nome_evento, paddock1_lat, paddock1_lon, paddock2_lat, paddock2_lon, 
+              paddock_raggio, allarme_fermo_minuti
+       FROM eventi 
+       WHERE codice_gara LIKE $1 || '-%'
+       ORDER BY codice_gara`,
+      [prefisso]
+    );
+    
+    if (eventiResult.rows.length === 0) {
+      return res.json({ success: true, eventi: [], sos: [], piloti_fermi: [], piloti_segnale_perso: [], posizioni: [] });
+    }
+    
+    const eventi = eventiResult.rows;
+    const eventiIds = eventi.map(e => e.id);
+    const codiciGara = eventi.map(e => e.codice_gara);
+    
+    // 1. SOS attivi da tutti gli eventi
+    const sosResult = await pool.query(
+      `SELECT mp.*, e.codice_gara, e.nome_evento
+       FROM messaggi_piloti mp
+       JOIN eventi e ON mp.codice_gara = e.codice_gara
+       WHERE mp.codice_gara = ANY($1) AND mp.tipo = 'sos' AND mp.letto = false
+       ORDER BY mp.created_at DESC`,
+      [codiciGara]
+    );
+    
+    // 2. Per ogni evento, calcola piloti fermi e segnale perso
+    let tuttiPilotiFermi = [];
+    let tuttiSegnalePerso = [];
+    let tuttiPosizioni = [];
+    
+    for (const evento of eventi) {
+      const allarmeMinuti = evento.allarme_fermo_minuti || 10;
+      const raggioP = evento.paddock_raggio || 500;
+      
+      // Posizioni piloti
+      const posResult = await pool.query(
+        `SELECT DISTINCT ON (numero_pilota) numero_pilota, lat, lon, created_at
+         FROM posizioni_piloti 
+         WHERE codice_gara = $1
+         ORDER BY numero_pilota, created_at DESC`,
+        [evento.codice_gara]
+      );
+      
+      for (const pos of posResult.rows) {
+        // Verifica se nel paddock
+        let inPaddock = false;
+        if (evento.paddock1_lat && evento.paddock1_lon) {
+          const dist1 = Math.sqrt(Math.pow((pos.lat - evento.paddock1_lat) * 111000, 2) + Math.pow((pos.lon - evento.paddock1_lon) * 85000, 2));
+          if (dist1 < raggioP) inPaddock = true;
+        }
+        if (evento.paddock2_lat && evento.paddock2_lon) {
+          const dist2 = Math.sqrt(Math.pow((pos.lat - evento.paddock2_lat) * 111000, 2) + Math.pow((pos.lon - evento.paddock2_lon) * 85000, 2));
+          if (dist2 < raggioP) inPaddock = true;
+        }
+        
+        const minutiFa = Math.floor((Date.now() - new Date(pos.created_at).getTime()) / 60000);
+        
+        // Segnale perso (no GPS da X minuti)
+        if (minutiFa > allarmeMinuti && !inPaddock) {
+          tuttiSegnalePerso.push({
+            ...pos,
+            codice_gara: evento.codice_gara,
+            nome_evento: evento.nome_evento,
+            minuti_senza_segnale: minutiFa
+          });
+        }
+        
+        // Aggiungi a posizioni
+        tuttiPosizioni.push({
+          ...pos,
+          codice_gara: evento.codice_gara,
+          nome_evento: evento.nome_evento,
+          minuti_fa: minutiFa
+        });
+      }
+      
+      // Piloti fermi (movimento < 50m in X minuti)
+      const fermiResult = await pool.query(
+        `WITH posizioni_recenti AS (
+          SELECT numero_pilota, lat, lon, created_at,
+                 LAG(lat) OVER (PARTITION BY numero_pilota ORDER BY created_at) as prev_lat,
+                 LAG(lon) OVER (PARTITION BY numero_pilota ORDER BY created_at) as prev_lon,
+                 LAG(created_at) OVER (PARTITION BY numero_pilota ORDER BY created_at) as prev_time
+          FROM posizioni_piloti
+          WHERE codice_gara = $1 AND created_at > NOW() - INTERVAL '${allarmeMinuti * 2} minutes'
+        )
+        SELECT numero_pilota, lat, lon, created_at,
+               SQRT(POW((lat - prev_lat) * 111000, 2) + POW((lon - prev_lon) * 85000, 2)) as distanza
+        FROM posizioni_recenti
+        WHERE prev_lat IS NOT NULL`,
+        [evento.codice_gara]
+      );
+      
+      // Raggruppa per pilota e verifica movimento
+      const movimentoPiloti = {};
+      for (const pos of fermiResult.rows) {
+        if (!movimentoPiloti[pos.numero_pilota]) {
+          movimentoPiloti[pos.numero_pilota] = { totale: 0, ultimaPos: pos };
+        }
+        movimentoPiloti[pos.numero_pilota].totale += parseFloat(pos.distanza) || 0;
+        movimentoPiloti[pos.numero_pilota].ultimaPos = pos;
+      }
+      
+      for (const [numero, data] of Object.entries(movimentoPiloti)) {
+        if (data.totale < 50) {
+          // Verifica non in paddock
+          let inPaddock = false;
+          if (evento.paddock1_lat && evento.paddock1_lon) {
+            const dist1 = Math.sqrt(Math.pow((data.ultimaPos.lat - evento.paddock1_lat) * 111000, 2) + Math.pow((data.ultimaPos.lon - evento.paddock1_lon) * 85000, 2));
+            if (dist1 < raggioP) inPaddock = true;
+          }
+          if (!inPaddock) {
+            tuttiPilotiFermi.push({
+              numero_pilota: parseInt(numero),
+              lat: data.ultimaPos.lat,
+              lon: data.ultimaPos.lon,
+              codice_gara: evento.codice_gara,
+              nome_evento: evento.nome_evento,
+              movimento_totale: Math.round(data.totale)
+            });
+          }
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      eventi: eventi.map(e => ({ codice_gara: e.codice_gara, nome_evento: e.nome_evento })),
+      sos: sosResult.rows,
+      piloti_fermi: tuttiPilotiFermi,
+      piloti_segnale_perso: tuttiSegnalePerso,
+      posizioni: tuttiPosizioni
+    });
+    
+  } catch (err) {
+    console.error('[GET /api/ddg/multi] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================
 // FINE API SQUADRE
 // ============================================
 
