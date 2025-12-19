@@ -1805,7 +1805,7 @@ app.post('/api/app/login', async (req, res) => {
   try {
     const { codice_accesso, numero_pilota } = req.body;
     
-    if (!codice_accesso || !numero_pilota) {
+    if (!codice_accesso || numero_pilota === undefined || numero_pilota === null) {
       return res.status(400).json({ 
         success: false, 
         error: 'Codice gara e numero pilota richiesti' 
@@ -1827,6 +1827,32 @@ app.post('/api/app/login', async (req, res) => {
     
     const evento = eventoResult.rows[0];
     
+    // NUOVO Chat 21: Login DdG con numero 0
+    if (parseInt(numero_pilota) === 0) {
+      return res.json({
+        success: true,
+        isDdG: true,
+        pilota: {
+          id: null,
+          numero: 0,
+          nome: 'Direzione',
+          cognome: 'Gara',
+          classe: 'DdG',
+          moto: '',
+          team: ''
+        },
+        evento: {
+          id: evento.id,
+          nome: evento.nome_evento,
+          codice_gara: evento.codice_gara,
+          data: evento.data_inizio,
+          luogo: evento.luogo,
+          gps_frequenza: evento.gps_frequenza || 30,
+          allarme_fermo_minuti: evento.allarme_fermo_minuti || 10
+        }
+      });
+    }
+    
     // Trova pilota con questo numero in questo evento
     const pilotaResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
@@ -1844,6 +1870,7 @@ app.post('/api/app/login', async (req, res) => {
     
     res.json({
       success: true,
+      isDdG: false,
       pilota: {
         id: pilota.id,
         numero: pilota.numero_gara,
