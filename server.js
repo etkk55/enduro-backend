@@ -102,7 +102,8 @@ pool.query('SELECT NOW()', (err, res) => {
         ADD COLUMN IF NOT EXISTS paddock2_lon DECIMAL(11, 8),
         ADD COLUMN IF NOT EXISTS paddock_raggio INTEGER DEFAULT 500,
         ADD COLUMN IF NOT EXISTS gps_frequenza INTEGER DEFAULT 30,
-        ADD COLUMN IF NOT EXISTS allarme_fermo_minuti INTEGER DEFAULT 10;
+        ADD COLUMN IF NOT EXISTS allarme_fermo_minuti INTEGER DEFAULT 10,
+        ADD COLUMN IF NOT EXISTS codice_ddg VARCHAR(20);
       `);
     }).then(() => {
       console.log('Migrazione paddock e GPS completata');
@@ -239,7 +240,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       paddock2_lat, paddock2_lon, 
       paddock_raggio, 
       gps_frequenza, 
-      allarme_fermo_minuti 
+      allarme_fermo_minuti,
+      codice_ddg
     } = req.body;
     
     const result = await pool.query(
@@ -248,14 +250,16 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         paddock2_lat = $3, paddock2_lon = $4,
         paddock_raggio = $5,
         gps_frequenza = $6,
-        allarme_fermo_minuti = $7
-      WHERE id = $8 RETURNING *`,
+        allarme_fermo_minuti = $7,
+        codice_ddg = $8
+      WHERE id = $9 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
         paddock_raggio || 500,
         gps_frequenza || 30,
         allarme_fermo_minuti || 10,
+        codice_ddg || null,
         id
       ]
     );
@@ -352,64 +356,132 @@ app.get('/api/eventi/:id/piloti-fermi', async (req, res) => {
     const evento = eventoResult.rows[0];
     const sogliaMinuti = evento.allarme_fermo_minuti || 10;
     const raggioM = evento.paddock_raggio || 500;
+    const raggioFermoM = 50; // Considera "fermo" se si è mosso meno di 50m
     
-    // Ottieni ultima posizione per ogni pilota
+    // Funzione per calcolare distanza in metri (Haversine)
+    const distanza = (lat1, lon1, lat2, lon2) => {
+      const R = 6371000;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    };
+    
+    // Ottieni TUTTE le posizioni degli ultimi X*2 minuti per ogni pilota
     const posizioniResult = await pool.query(`
-      SELECT DISTINCT ON (numero_pilota) 
-        numero_pilota, lat, lon, created_at
+      SELECT numero_pilota, lat, lon, created_at
+      FROM posizioni_piloti 
+      WHERE codice_gara = $1 
+        AND created_at > NOW() - INTERVAL '${sogliaMinuti * 2} minutes'
+      ORDER BY numero_pilota, created_at ASC
+    `, [evento.codice_gara]);
+    
+    // Ottieni ULTIMA posizione di TUTTI i piloti che hanno mai inviato GPS (per segnale perso)
+    const ultimePosResult = await pool.query(`
+      SELECT DISTINCT ON (numero_pilota) numero_pilota, lat, lon, created_at
       FROM posizioni_piloti 
       WHERE codice_gara = $1
       ORDER BY numero_pilota, created_at DESC
     `, [evento.codice_gara]);
     
+    // Raggruppa posizioni recenti per pilota
+    const posPerPilota = {};
+    posizioniResult.rows.forEach(pos => {
+      if (!posPerPilota[pos.numero_pilota]) {
+        posPerPilota[pos.numero_pilota] = [];
+      }
+      posPerPilota[pos.numero_pilota].push(pos);
+    });
+    
     const pilotiFermi = [];
+    const pilotiSegnalePerso = [];
     const now = new Date();
     
-    posizioniResult.rows.forEach(pos => {
+    // 1. Trova piloti con SEGNALE PERSO (non inviano GPS da X minuti)
+    ultimePosResult.rows.forEach(pos => {
       const minutiDaUltimaPos = (now - new Date(pos.created_at)) / 60000;
       
-      // Se ultima posizione > soglia minuti
+      // Se non ha inviato posizione da più di X minuti
       if (minutiDaUltimaPos > sogliaMinuti) {
         // Verifica se NON è nel paddock
         let nelPaddock = false;
         
-        // Funzione per calcolare distanza in metri (Haversine)
-        const distanza = (lat1, lon1, lat2, lon2) => {
-          const R = 6371000; // raggio terra in metri
-          const dLat = (lat2 - lat1) * Math.PI / 180;
-          const dLon = (lon2 - lon1) * Math.PI / 180;
-          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                    Math.sin(dLon/2) * Math.sin(dLon/2);
-          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-          return R * c;
-        };
-        
-        // Check paddock 1
         if (evento.paddock1_lat && evento.paddock1_lon) {
           const dist1 = distanza(pos.lat, pos.lon, evento.paddock1_lat, evento.paddock1_lon);
           if (dist1 <= raggioM) nelPaddock = true;
         }
         
-        // Check paddock 2
         if (!nelPaddock && evento.paddock2_lat && evento.paddock2_lon) {
           const dist2 = distanza(pos.lat, pos.lon, evento.paddock2_lat, evento.paddock2_lon);
           if (dist2 <= raggioM) nelPaddock = true;
         }
         
         if (!nelPaddock) {
-          pilotiFermi.push({
+          pilotiSegnalePerso.push({
             numero_pilota: pos.numero_pilota,
+            tipo: 'segnale_perso',
             lat: pos.lat,
             lon: pos.lon,
             ultima_posizione: pos.created_at,
-            minuti_fermo: Math.round(minutiDaUltimaPos)
+            minuti_senza_segnale: Math.round(minutiDaUltimaPos)
           });
         }
       }
     });
     
-    res.json({ success: true, piloti_fermi: pilotiFermi });
+    // 2. Trova piloti FERMI (continuano a inviare ma non si muovono)
+    Object.keys(posPerPilota).forEach(numeroPilota => {
+      const posizioni = posPerPilota[numeroPilota];
+      if (posizioni.length < 2) return;
+      
+      const primaPos = posizioni[0];
+      const ultimaPos = posizioni[posizioni.length - 1];
+      
+      const minutiCoperti = (new Date(ultimaPos.created_at) - new Date(primaPos.created_at)) / 60000;
+      
+      if (minutiCoperti >= sogliaMinuti) {
+        const movimento = distanza(primaPos.lat, primaPos.lon, ultimaPos.lat, ultimaPos.lon);
+        
+        if (movimento < raggioFermoM) {
+          let nelPaddock = false;
+          
+          if (evento.paddock1_lat && evento.paddock1_lon) {
+            const dist1 = distanza(ultimaPos.lat, ultimaPos.lon, evento.paddock1_lat, evento.paddock1_lon);
+            if (dist1 <= raggioM) nelPaddock = true;
+          }
+          
+          if (!nelPaddock && evento.paddock2_lat && evento.paddock2_lon) {
+            const dist2 = distanza(ultimaPos.lat, ultimaPos.lon, evento.paddock2_lat, evento.paddock2_lon);
+            if (dist2 <= raggioM) nelPaddock = true;
+          }
+          
+          if (!nelPaddock) {
+            pilotiFermi.push({
+              numero_pilota: parseInt(numeroPilota),
+              tipo: 'fermo',
+              lat: ultimaPos.lat,
+              lon: ultimaPos.lon,
+              ultima_posizione: ultimaPos.created_at,
+              minuti_fermo: Math.round(minutiCoperti),
+              movimento_metri: Math.round(movimento)
+            });
+          }
+        }
+      }
+    });
+    
+    // Ordina per gravità
+    pilotiSegnalePerso.sort((a, b) => b.minuti_senza_segnale - a.minuti_senza_segnale);
+    pilotiFermi.sort((a, b) => b.minuti_fermo - a.minuti_fermo);
+    
+    res.json({ 
+      success: true, 
+      piloti_fermi: pilotiFermi,
+      piloti_segnale_perso: pilotiSegnalePerso
+    });
   } catch (err) {
     console.error('[GET /api/eventi/:id/piloti-fermi] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -1827,14 +1899,17 @@ app.post('/api/app/login', async (req, res) => {
     
     const evento = eventoResult.rows[0];
     
-    // NUOVO Chat 21: Login DdG con numero 0
-    if (parseInt(numero_pilota) === 0) {
+    // NUOVO Chat 21: Login DdG con codice configurabile o "0" come fallback
+    const codiceDdG = evento.codice_ddg || '0';
+    const inputPulito = String(numero_pilota).trim().toUpperCase();
+    
+    if (inputPulito === codiceDdG.toUpperCase() || inputPulito === '0') {
       return res.json({
         success: true,
         isDdG: true,
         pilota: {
           id: null,
-          numero: 0,
+          numero: inputPulito,
           nome: 'Direzione',
           cognome: 'Gara',
           classe: 'DdG',
