@@ -286,7 +286,7 @@ app.post('/api/app/posizione', async (req, res) => {
     
     // Trova evento
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -1884,9 +1884,9 @@ app.post('/api/app/login', async (req, res) => {
       });
     }
     
-    // Trova evento con questo codice_accesso
+    // Trova evento con questo codice_accesso O codice_gara (FICR)
     const eventoResult = await pool.query(
-      'SELECT * FROM eventi WHERE codice_accesso = $1',
+      'SELECT * FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2143,7 +2143,7 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
     
     // Verifica codice_accesso
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2191,7 +2191,7 @@ app.post('/api/app/sos', async (req, res) => {
     
     // Trova evento
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2233,7 +2233,7 @@ app.post('/api/app/messaggio', async (req, res) => {
     
     // Trova evento
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2374,7 +2374,7 @@ app.post('/api/app/squadra', async (req, res) => {
     
     // Trova evento
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2432,7 +2432,7 @@ app.get('/api/app/squadra/:codice_accesso/:numero_pilota', async (req, res) => {
     
     // Trova evento
     const eventoResult = await pool.query(
-      'SELECT codice_gara FROM eventi WHERE codice_accesso = $1',
+      'SELECT codice_gara FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
