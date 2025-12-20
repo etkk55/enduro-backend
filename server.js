@@ -149,6 +149,24 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Funzione get_next_comunicato_number aggiornata con tipo');
+      
+      // Modifica vincolo UNIQUE per includere tipo (permette numerazione separata per tipo)
+      return pool.query(`
+        DO $$
+        BEGIN
+          -- Rimuovi vecchio vincolo se esiste
+          IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'comunicati_codice_gara_numero_key') THEN
+            ALTER TABLE comunicati DROP CONSTRAINT comunicati_codice_gara_numero_key;
+          END IF;
+          
+          -- Crea nuovo vincolo con tipo (se non esiste già)
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'comunicati_codice_gara_numero_tipo_key') THEN
+            ALTER TABLE comunicati ADD CONSTRAINT comunicati_codice_gara_numero_tipo_key UNIQUE (codice_gara, numero, tipo);
+          END IF;
+        END $$;
+      `);
+    }).then(() => {
+      console.log('Vincolo UNIQUE aggiornato per includere tipo');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
