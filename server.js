@@ -10,7 +10,7 @@ const FICR_BASE_URL = process.env.FICR_URL || 'https://apienduro.ficr.it';
 
 // CORS - Allow all origins
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // PostgreSQL Pool - Railway provides DATABASE_URL as environment variable
 const pool = new Pool({
