@@ -124,6 +124,31 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Tabella posizioni_piloti creata');
+      
+      // NUOVO: Colonna tipo per comunicati (comunicato, general_info, paddock_info)
+      return pool.query(`
+        ALTER TABLE comunicati 
+        ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'comunicato';
+      `);
+    }).then(() => {
+      console.log('Migrazione tipo comunicati completata');
+      
+      // Aggiorna funzione numerazione per considerare il tipo
+      return pool.query(`
+        CREATE OR REPLACE FUNCTION get_next_comunicato_number(p_codice_gara VARCHAR, p_tipo VARCHAR DEFAULT 'comunicato')
+        RETURNS INTEGER AS $$
+        DECLARE
+          next_num INTEGER;
+        BEGIN
+          SELECT COALESCE(MAX(numero), 0) + 1 INTO next_num
+          FROM comunicati
+          WHERE codice_gara = p_codice_gara AND tipo = p_tipo;
+          RETURN next_num;
+        END;
+        $$ LANGUAGE plpgsql;
+      `);
+    }).then(() => {
+      console.log('Funzione get_next_comunicato_number aggiornata con tipo');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -1573,24 +1598,31 @@ app.post('/api/import-ficr', async (req, res) => {
 
 // 1. CREA COMUNICATO
 app.post('/api/comunicati', async (req, res) => {
-  const { codice_gara, testo, pdf_allegato, pdf_nome } = req.body;
+  const { codice_gara, testo, pdf_allegato, pdf_nome, tipo } = req.body;
+  const tipoDoc = tipo || 'comunicato'; // default: comunicato
   
   if (!codice_gara || !testo) {
     return res.status(400).json({ error: 'Codice gara e testo obbligatori' });
   }
 
+  // Valida tipo
+  const tipiValidi = ['comunicato', 'general_info', 'paddock_info'];
+  if (!tipiValidi.includes(tipoDoc)) {
+    return res.status(400).json({ error: 'Tipo non valido. Usa: comunicato, general_info, paddock_info' });
+  }
+
   try {
     const numeroResult = await pool.query(
-      'SELECT get_next_comunicato_number($1) as numero',
-      [codice_gara]
+      'SELECT get_next_comunicato_number($1, $2) as numero',
+      [codice_gara, tipoDoc]
     );
     const numero = numeroResult.rows[0].numero;
 
     const result = await pool.query(
-      `INSERT INTO comunicati (codice_gara, numero, testo, ora, data, pdf_allegato, pdf_nome)
-       VALUES ($1, $2, $3, CURRENT_TIME, CURRENT_DATE, $4, $5)
+      `INSERT INTO comunicati (codice_gara, numero, testo, ora, data, pdf_allegato, pdf_nome, tipo)
+       VALUES ($1, $2, $3, CURRENT_TIME, CURRENT_DATE, $4, $5, $6)
        RETURNING *`,
-      [codice_gara, numero, testo, pdf_allegato || null, pdf_nome || null]
+      [codice_gara, numero, testo, pdf_allegato || null, pdf_nome || null, tipoDoc]
     );
 
     const comunicato = result.rows[0];
@@ -1605,7 +1637,8 @@ app.post('/api/comunicati', async (req, res) => {
         testo: comunicato.testo,
         codice_gara: comunicato.codice_gara,
         pdf_allegato: comunicato.pdf_allegato,
-        pdf_nome: comunicato.pdf_nome
+        pdf_nome: comunicato.pdf_nome,
+        tipo: comunicato.tipo
       }
     });
   } catch (error) {
@@ -1614,20 +1647,29 @@ app.post('/api/comunicati', async (req, res) => {
   }
 });
 
-// 2. LISTA COMUNICATI PER GARA
+// 2. LISTA COMUNICATI PER GARA (con filtro opzionale per tipo)
 app.get('/api/comunicati/:codice_gara', async (req, res) => {
   const { codice_gara } = req.params;
+  const { tipo } = req.query; // ?tipo=comunicato oppure general_info o paddock_info
 
   try {
-    const result = await pool.query(
-      `SELECT id, numero, ora, data, testo, created_at, updated_at,
-              pdf_allegato, pdf_nome,
-              jsonb_array_length(letto_da) as num_letti
-       FROM comunicati
-       WHERE codice_gara = $1
-       ORDER BY numero DESC`,
-      [codice_gara]
-    );
+    let query = `SELECT id, numero, ora, data, testo, created_at, updated_at,
+            pdf_allegato, pdf_nome, tipo,
+            jsonb_array_length(letto_da) as num_letti
+     FROM comunicati
+     WHERE codice_gara = $1`;
+    
+    const params = [codice_gara];
+    
+    // Se specificato tipo, filtra
+    if (tipo) {
+      query += ` AND tipo = $2`;
+      params.push(tipo);
+    }
+    
+    query += ` ORDER BY numero DESC`;
+
+    const result = await pool.query(query, params);
 
     res.json({ success: true, comunicati: result.rows });
   } catch (error) {
@@ -1668,16 +1710,22 @@ app.put('/api/comunicati/:id', async (req, res) => {
   }
 });
 
-// 5. STATISTICHE
+// 5. STATISTICHE (con filtro opzionale per tipo)
 app.get('/api/comunicati/:codice_gara/stats', async (req, res) => {
   const { codice_gara } = req.params;
+  const { tipo } = req.query;
 
   try {
-    const stats = await pool.query(
-      `SELECT COUNT(*) as totale_comunicati, MAX(numero) as ultimo_numero
-       FROM comunicati WHERE codice_gara = $1`,
-      [codice_gara]
-    );
+    let query = `SELECT COUNT(*) as totale_comunicati, MAX(numero) as ultimo_numero
+       FROM comunicati WHERE codice_gara = $1`;
+    const params = [codice_gara];
+    
+    if (tipo) {
+      query += ` AND tipo = $2`;
+      params.push(tipo);
+    }
+    
+    const stats = await pool.query(query, params);
 
     // Rimosso query piloti_gara (tabella non esiste)
     // TODO: implementare quando si fa import FICR
@@ -2090,11 +2138,11 @@ app.get('/api/app/miei-tempi/:codice_accesso/:numero_pilota', async (req, res) =
 app.get('/api/app/comunicati/:codice_accesso', async (req, res) => {
   try {
     const { codice_accesso } = req.params;
-    const { after } = req.query; // timestamp per polling incrementale
+    const { after, tipo } = req.query; // timestamp per polling incrementale + tipo documento
     
-    // Trova evento
+    // Trova evento (accetta sia codice_accesso che codice_gara)
     const eventoResult = await pool.query(
-      'SELECT * FROM eventi WHERE codice_accesso = $1',
+      'SELECT * FROM eventi WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1',
       [codice_accesso.toUpperCase()]
     );
     
@@ -2104,18 +2152,25 @@ app.get('/api/app/comunicati/:codice_accesso', async (req, res) => {
     
     const evento = eventoResult.rows[0];
     
-    // Query comunicati (con filtro opzionale per polling)
+    // Query comunicati (con filtro opzionale per polling e tipo)
     let query = `
-      SELECT id, numero, ora, data, testo, 
+      SELECT id, numero, ora, data, testo, tipo,
              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
              pdf_nome, created_at
       FROM comunicati 
       WHERE codice_gara = $1
     `;
     const params = [evento.codice_gara];
+    let paramIndex = 2;
+    
+    if (tipo) {
+      query += ` AND tipo = $${paramIndex}`;
+      params.push(tipo);
+      paramIndex++;
+    }
     
     if (after) {
-      query += ' AND created_at > $2';
+      query += ` AND created_at > $${paramIndex}`;
       params.push(after);
     }
     
