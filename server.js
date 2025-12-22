@@ -195,6 +195,15 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonna orario_partenza aggiunta a piloti');
+      
+      // NUOVO Chat 20: Colonne aggiuntive per import XML iscritti
+      return pool.query(`
+        ALTER TABLE piloti 
+        ADD COLUMN IF NOT EXISTS licenza_fmi VARCHAR(20),
+        ADD COLUMN IF NOT EXISTS anno_nascita INTEGER;
+      `);
+    }).then(() => {
+      console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -1634,6 +1643,222 @@ app.post('/api/import-ficr', async (req, res) => {
 
   } catch (err) {
     console.error('[IMPORT] Errore:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// NUOVO Chat 20: IMPORT XML ISCRITTI (da Comitato Enduro)
+// ============================================
+app.post('/api/import-xml-iscritti', async (req, res) => {
+  try {
+    const { id_evento, xml_content } = req.body;
+    
+    if (!id_evento || !xml_content) {
+      return res.status(400).json({ error: 'Parametri mancanti: id_evento e xml_content richiesti' });
+    }
+    
+    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}`);
+    
+    // Decodifica base64 se necessario
+    let xmlText = xml_content;
+    if (xml_content.includes('base64,')) {
+      xmlText = Buffer.from(xml_content.split('base64,')[1], 'base64').toString('utf-8');
+    } else if (!xml_content.includes('<')) {
+      // Probabilmente è base64 puro
+      try {
+        xmlText = Buffer.from(xml_content, 'base64').toString('utf-8');
+      } catch (e) {
+        // Non è base64, usa così com'è
+      }
+    }
+    
+    // Parser semplice XML per estrarre conduttori
+    // Cerca tutti i tag <conduttore>...</conduttore>
+    const conduttoriMatch = xmlText.match(/<conduttore>[\s\S]*?<\/conduttore>/g);
+    
+    if (!conduttoriMatch || conduttoriMatch.length === 0) {
+      return res.status(400).json({ error: 'Nessun conduttore trovato nel file XML' });
+    }
+    
+    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori`);
+    
+    let pilotiImportati = 0;
+    let pilotiAggiornati = 0;
+    let errori = [];
+    
+    for (const conduttoreXml of conduttoriMatch) {
+      try {
+        // Estrai campi dal XML
+        const getField = (field) => {
+          const match = conduttoreXml.match(new RegExp(`<${field}>([^<]*)</${field}>`));
+          return match ? match[1].trim() : '';
+        };
+        
+        const ngara = parseInt(getField('ngara')) || null;
+        const cognome = getField('cognome');
+        const nome = getField('nome');
+        const licenza = getField('licenza');
+        const classe = getField('classe');
+        const categoria = getField('categoria');
+        const moto = getField('motociclo');
+        const motoclub = getField('motoclub');
+        const regione = getField('regione');
+        const annoNascita = parseInt(getField('anno_nascita')) || null;
+        
+        if (!ngara || !cognome) {
+          console.log(`[IMPORT-XML] Saltato: ngara=${ngara}, cognome=${cognome}`);
+          continue;
+        }
+        
+        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome}`);
+        
+        // Verifica se pilota esiste già
+        const existingResult = await pool.query(
+          'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+          [id_evento, ngara]
+        );
+        
+        if (existingResult.rows.length > 0) {
+          // UPDATE pilota esistente
+          await pool.query(
+            `UPDATE piloti SET 
+              cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, 
+              nazione = $6, licenza_fmi = $7, anno_nascita = $8
+            WHERE id_evento = $9 AND numero_gara = $10`,
+            [cognome, nome, classe, moto, motoclub, regione || 'ITA', licenza, annoNascita, id_evento, ngara]
+          );
+          pilotiAggiornati++;
+        } else {
+          // INSERT nuovo pilota
+          await pool.query(
+            `INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, nazione, licenza_fmi, anno_nascita)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [id_evento, ngara, cognome, nome, classe, moto, motoclub, regione || 'ITA', licenza, annoNascita]
+          );
+          pilotiImportati++;
+        }
+        
+      } catch (err) {
+        console.error(`[IMPORT-XML] Errore singolo conduttore:`, err.message);
+        errori.push(err.message);
+      }
+    }
+    
+    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati`);
+    
+    res.json({
+      success: true,
+      piloti_importati: pilotiImportati,
+      piloti_aggiornati: pilotiAggiornati,
+      totale_processati: conduttoriMatch.length,
+      errori: errori.length > 0 ? errori : undefined
+    });
+    
+  } catch (err) {
+    console.error('[IMPORT-XML] Errore:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// NUOVO Chat 20: IMPORT ORARI PARTENZA DA FICR STARTLIST
+// ============================================
+app.post('/api/import-orari-ficr', async (req, res) => {
+  try {
+    const { id_evento, anno, codiceEquipe, manifestazione, categoria } = req.body;
+    
+    if (!id_evento || !anno || !codiceEquipe || !manifestazione || !categoria) {
+      return res.status(400).json({ 
+        error: 'Parametri mancanti: id_evento, anno, codiceEquipe, manifestazione, categoria richiesti' 
+      });
+    }
+    
+    // API STARTLIST FICR
+    // Parametri: anno/equipe/manifestazione/giorno/prova/categoria/*/*/*/*/*
+    // giorno=1, prova=1 (partenza), categoria come passato
+    const url = `${FICR_BASE_URL}/END/mpcache-20/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/1/1/${categoria}/*/*/*/*/*`;
+    
+    console.log(`[IMPORT-ORARI] Chiamata FICR startlist: ${url}`);
+    
+    const headers = {
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://enduro.ficr.it',
+      'Referer': 'https://enduro.ficr.it/',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+      'Cache-Control': 'Private',
+      'Pragma': 'no-cache'
+    };
+    
+    const response = await axios.get(url, { headers });
+    
+    // Startlist può essere in data.clasdella o direttamente in data
+    let pilotiFicr = response.data?.data?.clasdella || response.data?.data || [];
+    
+    // Se è un oggetto, prova a estrarre l'array
+    if (!Array.isArray(pilotiFicr) && typeof pilotiFicr === 'object') {
+      pilotiFicr = Object.values(pilotiFicr).flat();
+    }
+    
+    console.log(`[IMPORT-ORARI] Piloti trovati da FICR: ${pilotiFicr.length}`);
+    
+    if (!Array.isArray(pilotiFicr) || pilotiFicr.length === 0) {
+      return res.status(404).json({ error: 'Nessun pilota trovato nella startlist FICR' });
+    }
+    
+    let pilotiAggiornati = 0;
+    let pilotiNonTrovati = [];
+    
+    for (const pilota of pilotiFicr) {
+      try {
+        const numero = parseInt(pilota.Numero);
+        const orario = pilota.Orario || pilota.op_Orario;
+        
+        if (!numero || !orario) {
+          console.log(`[IMPORT-ORARI] Saltato: numero=${numero}, orario=${orario}`);
+          continue;
+        }
+        
+        // Estrai solo HH:MM se orario è in formato ISO
+        let orarioPartenza = orario;
+        if (orario.includes('T')) {
+          // Formato ISO: 2000-01-01T09:00:00.000Z
+          const match = orario.match(/T(\d{2}:\d{2})/);
+          if (match) {
+            orarioPartenza = match[1];
+          }
+        }
+        
+        console.log(`[IMPORT-ORARI] Aggiorno #${numero} -> orario ${orarioPartenza}`);
+        
+        // UPDATE orario_partenza
+        const updateResult = await pool.query(
+          'UPDATE piloti SET orario_partenza = $1 WHERE id_evento = $2 AND numero_gara = $3',
+          [orarioPartenza, id_evento, numero]
+        );
+        
+        if (updateResult.rowCount > 0) {
+          pilotiAggiornati++;
+        } else {
+          pilotiNonTrovati.push(numero);
+        }
+        
+      } catch (err) {
+        console.error(`[IMPORT-ORARI] Errore singolo pilota:`, err.message);
+      }
+    }
+    
+    console.log(`[IMPORT-ORARI] Completato: ${pilotiAggiornati} aggiornati, ${pilotiNonTrovati.length} non trovati`);
+    
+    res.json({
+      success: true,
+      piloti_aggiornati: pilotiAggiornati,
+      piloti_non_trovati: pilotiNonTrovati.length > 0 ? pilotiNonTrovati : undefined,
+      totale_ficr: pilotiFicr.length
+    });
+    
+  } catch (err) {
+    console.error('[IMPORT-ORARI] Errore:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3164,9 +3389,9 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
   try {
     const { codice_gara, numero_pilota } = req.params;
     
-    // 1. Trova evento e tempi settore (FIX: alias per evitare conflitto id)
+    // 1. Trova evento e tempi settore
     const eventoResult = await pool.query(
-      'SELECT e.id as evento_id, e.codice_gara, e.nome_evento, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
+      'SELECT e.*, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
       [codice_gara]
     );
     
@@ -3176,10 +3401,10 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     
     const evento = eventoResult.rows[0];
     
-    // 2. Trova pilota con orario partenza (FIX: usa evento_id)
+    // 2. Trova pilota con orario partenza
     const pilotaResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-      [evento.evento_id, numero_pilota]
+      [evento.id, numero_pilota]
     );
     
     if (pilotaResult.rows.length === 0) {
@@ -3203,7 +3428,9 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     }
     
     // 4. Calcola orari teorici
-    const orarioPartenza = pilota.orario_partenza || '09:00'; // Default se non impostato
+    // L'orario partenza deve venire da FICR (campo orario_partenza nel pilota)
+    // Per ora usiamo un campo che dovremo aggiungere, oppure calcoliamo dalla sequenza
+    const orarioPartenza = pilota.orario_partenza || '09:00'; // Default, da implementare
     
     // Parsing orario partenza
     const [ore, minuti] = orarioPartenza.split(':').map(Number);
@@ -3231,30 +3458,6 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
       orari.co3 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
     }
     
-    // CO4
-    if (evento.co4_attivo && evento.tempo_co3_co4) {
-      minTotali += evento.tempo_co3_co4;
-      orari.co4 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
-    }
-    
-    // CO5
-    if (evento.co5_attivo && evento.tempo_co4_co5) {
-      minTotali += evento.tempo_co4_co5;
-      orari.co5 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
-    }
-    
-    // CO6
-    if (evento.co6_attivo && evento.tempo_co5_co6) {
-      minTotali += evento.tempo_co5_co6;
-      orari.co6 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
-    }
-    
-    // CO7
-    if (evento.co7_attivo && evento.tempo_co6_co7) {
-      minTotali += evento.tempo_co6_co7;
-      orari.co7 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
-    }
-    
     // Arrivo
     if (evento.tempo_ultimo_arr) {
       minTotali += evento.tempo_ultimo_arr;
@@ -3273,11 +3476,7 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
       checkpoint_attivi: {
         co1: evento.co1_attivo,
         co2: evento.co2_attivo,
-        co3: evento.co3_attivo,
-        co4: evento.co4_attivo,
-        co5: evento.co5_attivo,
-        co6: evento.co6_attivo,
-        co7: evento.co7_attivo
+        co3: evento.co3_attivo
       }
     });
     
