@@ -195,21 +195,6 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonna orario_partenza aggiunta a piloti');
-      
-      // NUOVO Chat 20-02: Estendi tempi_settore per 7 CO
-      return pool.query(`
-        ALTER TABLE tempi_settore 
-        ADD COLUMN IF NOT EXISTS co4_attivo BOOLEAN DEFAULT false,
-        ADD COLUMN IF NOT EXISTS co5_attivo BOOLEAN DEFAULT false,
-        ADD COLUMN IF NOT EXISTS co6_attivo BOOLEAN DEFAULT false,
-        ADD COLUMN IF NOT EXISTS co7_attivo BOOLEAN DEFAULT false,
-        ADD COLUMN IF NOT EXISTS tempo_co3_co4 INTEGER,
-        ADD COLUMN IF NOT EXISTS tempo_co4_co5 INTEGER,
-        ADD COLUMN IF NOT EXISTS tempo_co5_co6 INTEGER,
-        ADD COLUMN IF NOT EXISTS tempo_co6_co7 INTEGER;
-      `);
-    }).then(() => {
-      console.log('Colonne CO4-CO7 aggiunte a tempi_settore');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -3142,24 +3127,30 @@ app.post('/api/eventi/:id/tempi-settore', async (req, res) => {
     const { id } = req.params;
     const { 
       codice_gara, 
-      co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo,
-      tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7,
+      co1_attivo, 
+      co2_attivo, 
+      co3_attivo,
+      tempo_par_co1,
+      tempo_co1_co2,
+      tempo_co2_co3,
       tempo_ultimo_arr
     } = req.body;
     
     // Upsert - inserisci o aggiorna
     const result = await pool.query(`
-      INSERT INTO tempi_settore (id_evento, codice_gara, co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7, tempo_ultimo_arr)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      INSERT INTO tempi_settore (id_evento, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (id_evento, codice_gara) 
       DO UPDATE SET 
-        co1_attivo = EXCLUDED.co1_attivo, co2_attivo = EXCLUDED.co2_attivo, co3_attivo = EXCLUDED.co3_attivo,
-        co4_attivo = EXCLUDED.co4_attivo, co5_attivo = EXCLUDED.co5_attivo, co6_attivo = EXCLUDED.co6_attivo, co7_attivo = EXCLUDED.co7_attivo,
-        tempo_par_co1 = EXCLUDED.tempo_par_co1, tempo_co1_co2 = EXCLUDED.tempo_co1_co2, tempo_co2_co3 = EXCLUDED.tempo_co2_co3,
-        tempo_co3_co4 = EXCLUDED.tempo_co3_co4, tempo_co4_co5 = EXCLUDED.tempo_co4_co5, tempo_co5_co6 = EXCLUDED.tempo_co5_co6, tempo_co6_co7 = EXCLUDED.tempo_co6_co7,
+        co1_attivo = EXCLUDED.co1_attivo,
+        co2_attivo = EXCLUDED.co2_attivo,
+        co3_attivo = EXCLUDED.co3_attivo,
+        tempo_par_co1 = EXCLUDED.tempo_par_co1,
+        tempo_co1_co2 = EXCLUDED.tempo_co1_co2,
+        tempo_co2_co3 = EXCLUDED.tempo_co2_co3,
         tempo_ultimo_arr = EXCLUDED.tempo_ultimo_arr
       RETURNING *
-    `, [id, codice_gara, co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7, tempo_ultimo_arr]);
+    `, [id, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr]);
     
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
@@ -3173,9 +3164,9 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
   try {
     const { codice_gara, numero_pilota } = req.params;
     
-    // 1. Trova evento e tempi settore
+    // 1. Trova evento e tempi settore (FIX: alias per evitare conflitto id)
     const eventoResult = await pool.query(
-      'SELECT e.*, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
+      'SELECT e.id as evento_id, e.codice_gara, e.nome_evento, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
       [codice_gara]
     );
     
@@ -3185,10 +3176,10 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     
     const evento = eventoResult.rows[0];
     
-    // 2. Trova pilota con orario partenza
+    // 2. Trova pilota con orario partenza (FIX: usa evento_id)
     const pilotaResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-      [evento.id, numero_pilota]
+      [evento.evento_id, numero_pilota]
     );
     
     if (pilotaResult.rows.length === 0) {
@@ -3212,9 +3203,7 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     }
     
     // 4. Calcola orari teorici
-    // L'orario partenza deve venire da FICR (campo orario_partenza nel pilota)
-    // Per ora usiamo un campo che dovremo aggiungere, oppure calcoliamo dalla sequenza
-    const orarioPartenza = pilota.orario_partenza || '09:00'; // Default, da implementare
+    const orarioPartenza = pilota.orario_partenza || '09:00'; // Default se non impostato
     
     // Parsing orario partenza
     const [ore, minuti] = orarioPartenza.split(':').map(Number);
@@ -3242,6 +3231,30 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
       orari.co3 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
     }
     
+    // CO4
+    if (evento.co4_attivo && evento.tempo_co3_co4) {
+      minTotali += evento.tempo_co3_co4;
+      orari.co4 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // CO5
+    if (evento.co5_attivo && evento.tempo_co4_co5) {
+      minTotali += evento.tempo_co4_co5;
+      orari.co5 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // CO6
+    if (evento.co6_attivo && evento.tempo_co5_co6) {
+      minTotali += evento.tempo_co5_co6;
+      orari.co6 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // CO7
+    if (evento.co7_attivo && evento.tempo_co6_co7) {
+      minTotali += evento.tempo_co6_co7;
+      orari.co7 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
     // Arrivo
     if (evento.tempo_ultimo_arr) {
       minTotali += evento.tempo_ultimo_arr;
@@ -3260,7 +3273,11 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
       checkpoint_attivi: {
         co1: evento.co1_attivo,
         co2: evento.co2_attivo,
-        co3: evento.co3_attivo
+        co3: evento.co3_attivo,
+        co4: evento.co4_attivo,
+        co5: evento.co5_attivo,
+        co6: evento.co6_attivo,
+        co7: evento.co7_attivo
       }
     });
     
