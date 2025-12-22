@@ -167,6 +167,34 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Vincolo UNIQUE aggiornato per includere tipo');
+      
+      // NUOVO Chat 20: Tabella tempi_settore per orari teorici piloti
+      return pool.query(`
+        CREATE TABLE IF NOT EXISTS tempi_settore (
+          id SERIAL PRIMARY KEY,
+          id_evento UUID REFERENCES eventi(id) ON DELETE CASCADE,
+          codice_gara VARCHAR(20),
+          co1_attivo BOOLEAN DEFAULT true,
+          co2_attivo BOOLEAN DEFAULT true,
+          co3_attivo BOOLEAN DEFAULT false,
+          tempo_par_co1 INTEGER,
+          tempo_co1_co2 INTEGER,
+          tempo_co2_co3 INTEGER,
+          tempo_ultimo_arr INTEGER,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(id_evento, codice_gara)
+        );
+      `);
+    }).then(() => {
+      console.log('Tabella tempi_settore creata');
+      
+      // NUOVO Chat 20: Colonna orario_partenza per piloti (da FICR)
+      return pool.query(`
+        ALTER TABLE piloti 
+        ADD COLUMN IF NOT EXISTS orario_partenza VARCHAR(10);
+      `);
+    }).then(() => {
+      console.log('Colonna orario_partenza aggiunta a piloti');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -3072,6 +3100,169 @@ app.get('/api/ddg/multi/:codice_gara', async (req, res) => {
 
 // ============================================
 // FINE API SQUADRE
+// ============================================
+
+// ============================================
+// API TEMPI SETTORE - Chat 20
+// ============================================
+
+// GET tempi settore per evento
+app.get('/api/eventi/:id/tempi-settore', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM tempi_settore WHERE id_evento = $1 ORDER BY codice_gara',
+      [id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[GET /api/eventi/:id/tempi-settore] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST/PUT tempi settore per gara specifica
+app.post('/api/eventi/:id/tempi-settore', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      codice_gara, 
+      co1_attivo, 
+      co2_attivo, 
+      co3_attivo,
+      tempo_par_co1,
+      tempo_co1_co2,
+      tempo_co2_co3,
+      tempo_ultimo_arr
+    } = req.body;
+    
+    // Upsert - inserisci o aggiorna
+    const result = await pool.query(`
+      INSERT INTO tempi_settore (id_evento, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ON CONFLICT (id_evento, codice_gara) 
+      DO UPDATE SET 
+        co1_attivo = EXCLUDED.co1_attivo,
+        co2_attivo = EXCLUDED.co2_attivo,
+        co3_attivo = EXCLUDED.co3_attivo,
+        tempo_par_co1 = EXCLUDED.tempo_par_co1,
+        tempo_co1_co2 = EXCLUDED.tempo_co1_co2,
+        tempo_co2_co3 = EXCLUDED.tempo_co2_co3,
+        tempo_ultimo_arr = EXCLUDED.tempo_ultimo_arr
+      RETURNING *
+    `, [id, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr]);
+    
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('[POST /api/eventi/:id/tempi-settore] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET orari teorici per pilota specifico
+app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) => {
+  try {
+    const { codice_gara, numero_pilota } = req.params;
+    
+    // 1. Trova evento e tempi settore
+    const eventoResult = await pool.query(
+      'SELECT e.*, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
+      [codice_gara]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Evento non trovato' });
+    }
+    
+    const evento = eventoResult.rows[0];
+    
+    // 2. Trova pilota con orario partenza
+    const pilotaResult = await pool.query(
+      'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+      [evento.id, numero_pilota]
+    );
+    
+    if (pilotaResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Pilota non trovato' });
+    }
+    
+    const pilota = pilotaResult.rows[0];
+    
+    // 3. Se non ci sono tempi settore configurati, restituisci solo partenza
+    if (!evento.tempo_par_co1) {
+      return res.json({
+        success: true,
+        pilota: {
+          numero: pilota.numero_gara,
+          cognome: pilota.cognome,
+          nome: pilota.nome
+        },
+        orari_configurati: false,
+        messaggio: 'Tempi settore non ancora configurati'
+      });
+    }
+    
+    // 4. Calcola orari teorici
+    // L'orario partenza deve venire da FICR (campo orario_partenza nel pilota)
+    // Per ora usiamo un campo che dovremo aggiungere, oppure calcoliamo dalla sequenza
+    const orarioPartenza = pilota.orario_partenza || '09:00'; // Default, da implementare
+    
+    // Parsing orario partenza
+    const [ore, minuti] = orarioPartenza.split(':').map(Number);
+    let minTotali = ore * 60 + minuti;
+    
+    const orari = {
+      partenza: orarioPartenza
+    };
+    
+    // CO1
+    if (evento.co1_attivo && evento.tempo_par_co1) {
+      minTotali += evento.tempo_par_co1;
+      orari.co1 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // CO2
+    if (evento.co2_attivo && evento.tempo_co1_co2) {
+      minTotali += evento.tempo_co1_co2;
+      orari.co2 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // CO3
+    if (evento.co3_attivo && evento.tempo_co2_co3) {
+      minTotali += evento.tempo_co2_co3;
+      orari.co3 = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    // Arrivo
+    if (evento.tempo_ultimo_arr) {
+      minTotali += evento.tempo_ultimo_arr;
+      orari.arrivo = `${Math.floor(minTotali / 60).toString().padStart(2, '0')}:${(minTotali % 60).toString().padStart(2, '0')}`;
+    }
+    
+    res.json({
+      success: true,
+      pilota: {
+        numero: pilota.numero_gara,
+        cognome: pilota.cognome,
+        nome: pilota.nome
+      },
+      orari_configurati: true,
+      orari: orari,
+      checkpoint_attivi: {
+        co1: evento.co1_attivo,
+        co2: evento.co2_attivo,
+        co3: evento.co3_attivo
+      }
+    });
+    
+  } catch (err) {
+    console.error('[GET /api/app/orari-teorici] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================
+// FINE API TEMPI SETTORE
 // ============================================
 
 app.listen(PORT, () => {
