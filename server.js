@@ -195,6 +195,21 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonna orario_partenza aggiunta a piloti');
+      
+      // NUOVO Chat 20-02: Estendi tempi_settore per 7 CO
+      return pool.query(`
+        ALTER TABLE tempi_settore 
+        ADD COLUMN IF NOT EXISTS co4_attivo BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS co5_attivo BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS co6_attivo BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS co7_attivo BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS tempo_co3_co4 INTEGER,
+        ADD COLUMN IF NOT EXISTS tempo_co4_co5 INTEGER,
+        ADD COLUMN IF NOT EXISTS tempo_co5_co6 INTEGER,
+        ADD COLUMN IF NOT EXISTS tempo_co6_co7 INTEGER;
+      `);
+    }).then(() => {
+      console.log('Colonne CO4-CO7 aggiunte a tempi_settore');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -3127,30 +3142,24 @@ app.post('/api/eventi/:id/tempi-settore', async (req, res) => {
     const { id } = req.params;
     const { 
       codice_gara, 
-      co1_attivo, 
-      co2_attivo, 
-      co3_attivo,
-      tempo_par_co1,
-      tempo_co1_co2,
-      tempo_co2_co3,
+      co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo,
+      tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7,
       tempo_ultimo_arr
     } = req.body;
     
     // Upsert - inserisci o aggiorna
     const result = await pool.query(`
-      INSERT INTO tempi_settore (id_evento, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO tempi_settore (id_evento, codice_gara, co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7, tempo_ultimo_arr)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       ON CONFLICT (id_evento, codice_gara) 
       DO UPDATE SET 
-        co1_attivo = EXCLUDED.co1_attivo,
-        co2_attivo = EXCLUDED.co2_attivo,
-        co3_attivo = EXCLUDED.co3_attivo,
-        tempo_par_co1 = EXCLUDED.tempo_par_co1,
-        tempo_co1_co2 = EXCLUDED.tempo_co1_co2,
-        tempo_co2_co3 = EXCLUDED.tempo_co2_co3,
+        co1_attivo = EXCLUDED.co1_attivo, co2_attivo = EXCLUDED.co2_attivo, co3_attivo = EXCLUDED.co3_attivo,
+        co4_attivo = EXCLUDED.co4_attivo, co5_attivo = EXCLUDED.co5_attivo, co6_attivo = EXCLUDED.co6_attivo, co7_attivo = EXCLUDED.co7_attivo,
+        tempo_par_co1 = EXCLUDED.tempo_par_co1, tempo_co1_co2 = EXCLUDED.tempo_co1_co2, tempo_co2_co3 = EXCLUDED.tempo_co2_co3,
+        tempo_co3_co4 = EXCLUDED.tempo_co3_co4, tempo_co4_co5 = EXCLUDED.tempo_co4_co5, tempo_co5_co6 = EXCLUDED.tempo_co5_co6, tempo_co6_co7 = EXCLUDED.tempo_co6_co7,
         tempo_ultimo_arr = EXCLUDED.tempo_ultimo_arr
       RETURNING *
-    `, [id, codice_gara, co1_attivo, co2_attivo, co3_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_ultimo_arr]);
+    `, [id, codice_gara, co1_attivo, co2_attivo, co3_attivo, co4_attivo, co5_attivo, co6_attivo, co7_attivo, tempo_par_co1, tempo_co1_co2, tempo_co2_co3, tempo_co3_co4, tempo_co4_co5, tempo_co5_co6, tempo_co6_co7, tempo_ultimo_arr]);
     
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
