@@ -195,33 +195,6 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonna orario_partenza aggiunta a piloti');
-      
-      // NUOVO Chat 20: Colonne aggiuntive per import XML iscritti
-      return pool.query(`
-        ALTER TABLE piloti 
-        ADD COLUMN IF NOT EXISTS licenza_fmi VARCHAR(20),
-        ADD COLUMN IF NOT EXISTS anno_nascita INTEGER;
-      `);
-    }).then(() => {
-      console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
-      
-      // NUOVO Chat 21: Colonna codice_fmi per transcodifica FMI→FICR
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS codice_fmi VARCHAR(20);
-      `);
-    }).then(() => {
-      console.log('Colonna codice_fmi aggiunta a eventi');
-      
-      // NUOVO Chat 21b: Campi configurazione FICR per import startlist
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS ficr_anno INTEGER,
-        ADD COLUMN IF NOT EXISTS ficr_codice_equipe VARCHAR(10),
-        ADD COLUMN IF NOT EXISTS ficr_manifestazione VARCHAR(10);
-      `);
-    }).then(() => {
-      console.log('Campi FICR (anno, codice_equipe, manifestazione) aggiunti a eventi');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -339,11 +312,7 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       paddock_raggio, 
       gps_frequenza, 
       allarme_fermo_minuti,
-      codice_ddg,
-      codice_fmi,
-      ficr_anno,
-      ficr_codice_equipe,
-      ficr_manifestazione
+      codice_ddg
     } = req.body;
     
     const result = await pool.query(
@@ -353,12 +322,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         paddock_raggio = $5,
         gps_frequenza = $6,
         allarme_fermo_minuti = $7,
-        codice_ddg = $8,
-        codice_fmi = $9,
-        ficr_anno = $10,
-        ficr_codice_equipe = $11,
-        ficr_manifestazione = $12
-      WHERE id = $13 RETURNING *`,
+        codice_ddg = $8
+      WHERE id = $9 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
@@ -366,10 +331,6 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         gps_frequenza || 30,
         allarme_fermo_minuti || 10,
         codice_ddg || null,
-        codice_fmi || null,
-        ficr_anno || null,
-        ficr_codice_equipe || null,
-        ficr_manifestazione || null,
         id
       ]
     );
@@ -1678,222 +1639,6 @@ app.post('/api/import-ficr', async (req, res) => {
 });
 
 // ============================================
-// NUOVO Chat 20: IMPORT XML ISCRITTI (da Comitato Enduro)
-// ============================================
-app.post('/api/import-xml-iscritti', async (req, res) => {
-  try {
-    const { id_evento, xml_content } = req.body;
-    
-    if (!id_evento || !xml_content) {
-      return res.status(400).json({ error: 'Parametri mancanti: id_evento e xml_content richiesti' });
-    }
-    
-    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}`);
-    
-    // Decodifica base64 se necessario
-    let xmlText = xml_content;
-    if (xml_content.includes('base64,')) {
-      xmlText = Buffer.from(xml_content.split('base64,')[1], 'base64').toString('utf-8');
-    } else if (!xml_content.includes('<')) {
-      // Probabilmente è base64 puro
-      try {
-        xmlText = Buffer.from(xml_content, 'base64').toString('utf-8');
-      } catch (e) {
-        // Non è base64, usa così com'è
-      }
-    }
-    
-    // Parser semplice XML per estrarre conduttori
-    // Cerca tutti i tag <conduttore>...</conduttore>
-    const conduttoriMatch = xmlText.match(/<conduttore>[\s\S]*?<\/conduttore>/g);
-    
-    if (!conduttoriMatch || conduttoriMatch.length === 0) {
-      return res.status(400).json({ error: 'Nessun conduttore trovato nel file XML' });
-    }
-    
-    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori`);
-    
-    let pilotiImportati = 0;
-    let pilotiAggiornati = 0;
-    let errori = [];
-    
-    for (const conduttoreXml of conduttoriMatch) {
-      try {
-        // Estrai campi dal XML
-        const getField = (field) => {
-          const match = conduttoreXml.match(new RegExp(`<${field}>([^<]*)</${field}>`));
-          return match ? match[1].trim() : '';
-        };
-        
-        const ngara = parseInt(getField('ngara')) || null;
-        const cognome = getField('cognome');
-        const nome = getField('nome');
-        const licenza = getField('licenza');
-        const classe = getField('classe');
-        const categoria = getField('categoria');
-        const moto = getField('motociclo');
-        const motoclub = getField('motoclub');
-        const regione = getField('regione');
-        const annoNascita = parseInt(getField('anno_nascita')) || null;
-        
-        if (!ngara || !cognome) {
-          console.log(`[IMPORT-XML] Saltato: ngara=${ngara}, cognome=${cognome}`);
-          continue;
-        }
-        
-        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome}`);
-        
-        // Verifica se pilota esiste già
-        const existingResult = await pool.query(
-          'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-          [id_evento, ngara]
-        );
-        
-        if (existingResult.rows.length > 0) {
-          // UPDATE pilota esistente
-          await pool.query(
-            `UPDATE piloti SET 
-              cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, 
-              nazione = $6, licenza_fmi = $7, anno_nascita = $8
-            WHERE id_evento = $9 AND numero_gara = $10`,
-            [cognome, nome, classe, moto, motoclub, regione || 'ITA', licenza, annoNascita, id_evento, ngara]
-          );
-          pilotiAggiornati++;
-        } else {
-          // INSERT nuovo pilota
-          await pool.query(
-            `INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, nazione, licenza_fmi, anno_nascita)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-            [id_evento, ngara, cognome, nome, classe, moto, motoclub, regione || 'ITA', licenza, annoNascita]
-          );
-          pilotiImportati++;
-        }
-        
-      } catch (err) {
-        console.error(`[IMPORT-XML] Errore singolo conduttore:`, err.message);
-        errori.push(err.message);
-      }
-    }
-    
-    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati`);
-    
-    res.json({
-      success: true,
-      piloti_importati: pilotiImportati,
-      piloti_aggiornati: pilotiAggiornati,
-      totale_processati: conduttoriMatch.length,
-      errori: errori.length > 0 ? errori : undefined
-    });
-    
-  } catch (err) {
-    console.error('[IMPORT-XML] Errore:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================
-// NUOVO Chat 20: IMPORT ORARI PARTENZA DA FICR STARTLIST
-// ============================================
-app.post('/api/import-orari-ficr', async (req, res) => {
-  try {
-    const { id_evento, anno, codiceEquipe, manifestazione, categoria } = req.body;
-    
-    if (!id_evento || !anno || !codiceEquipe || !manifestazione || !categoria) {
-      return res.status(400).json({ 
-        error: 'Parametri mancanti: id_evento, anno, codiceEquipe, manifestazione, categoria richiesti' 
-      });
-    }
-    
-    // API STARTLIST FICR
-    // Parametri: anno/equipe/manifestazione/giorno/prova/categoria/*/*/*/*/*
-    // giorno=1, prova=1 (partenza), categoria come passato
-    const url = `${FICR_BASE_URL}/END/mpcache-20/get/startlist/${anno}/${codiceEquipe}/${manifestazione}/1/1/${categoria}/*/*/*/*/*`;
-    
-    console.log(`[IMPORT-ORARI] Chiamata FICR startlist: ${url}`);
-    
-    const headers = {
-      'Accept': 'application/json, text/plain, */*',
-      'Origin': 'https://enduro.ficr.it',
-      'Referer': 'https://enduro.ficr.it/',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
-      'Cache-Control': 'Private',
-      'Pragma': 'no-cache'
-    };
-    
-    const response = await axios.get(url, { headers });
-    
-    // Startlist può essere in data.clasdella o direttamente in data
-    let pilotiFicr = response.data?.data?.clasdella || response.data?.data || [];
-    
-    // Se è un oggetto, prova a estrarre l'array
-    if (!Array.isArray(pilotiFicr) && typeof pilotiFicr === 'object') {
-      pilotiFicr = Object.values(pilotiFicr).flat();
-    }
-    
-    console.log(`[IMPORT-ORARI] Piloti trovati da FICR: ${pilotiFicr.length}`);
-    
-    if (!Array.isArray(pilotiFicr) || pilotiFicr.length === 0) {
-      return res.status(404).json({ error: 'Nessun pilota trovato nella startlist FICR' });
-    }
-    
-    let pilotiAggiornati = 0;
-    let pilotiNonTrovati = [];
-    
-    for (const pilota of pilotiFicr) {
-      try {
-        const numero = parseInt(pilota.Numero);
-        const orario = pilota.Orario || pilota.op_Orario;
-        
-        if (!numero || !orario) {
-          console.log(`[IMPORT-ORARI] Saltato: numero=${numero}, orario=${orario}`);
-          continue;
-        }
-        
-        // Estrai solo HH:MM se orario è in formato ISO
-        let orarioPartenza = orario;
-        if (orario.includes('T')) {
-          // Formato ISO: 2000-01-01T09:00:00.000Z
-          const match = orario.match(/T(\d{2}:\d{2})/);
-          if (match) {
-            orarioPartenza = match[1];
-          }
-        }
-        
-        console.log(`[IMPORT-ORARI] Aggiorno #${numero} -> orario ${orarioPartenza}`);
-        
-        // UPDATE orario_partenza
-        const updateResult = await pool.query(
-          'UPDATE piloti SET orario_partenza = $1 WHERE id_evento = $2 AND numero_gara = $3',
-          [orarioPartenza, id_evento, numero]
-        );
-        
-        if (updateResult.rowCount > 0) {
-          pilotiAggiornati++;
-        } else {
-          pilotiNonTrovati.push(numero);
-        }
-        
-      } catch (err) {
-        console.error(`[IMPORT-ORARI] Errore singolo pilota:`, err.message);
-      }
-    }
-    
-    console.log(`[IMPORT-ORARI] Completato: ${pilotiAggiornati} aggiornati, ${pilotiNonTrovati.length} non trovati`);
-    
-    res.json({
-      success: true,
-      piloti_aggiornati: pilotiAggiornati,
-      piloti_non_trovati: pilotiNonTrovati.length > 0 ? pilotiNonTrovati : undefined,
-      totale_ficr: pilotiFicr.length
-    });
-    
-  } catch (err) {
-    console.error('[IMPORT-ORARI] Errore:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================
 // ENDPOINT COMUNICATI
 // ============================================
 
@@ -2524,98 +2269,6 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /api/app/comunicati/pdf] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// ============================================
-// API ERTA OPEN - Accesso senza login (Chat 21)
-// ============================================
-
-// GET info evento + piloti + comunicati (NO LOGIN) - Aggrega per codice_fmi
-app.get('/api/app/evento/:codice/open', async (req, res) => {
-  try {
-    const { codice } = req.params;
-    const codiceUpper = codice.toUpperCase();
-    
-    // Prima cerca per codice_fmi (può restituire multiple gare)
-    let eventiResult = await pool.query(
-      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-       FROM eventi 
-       WHERE UPPER(codice_fmi) = $1`,
-      [codiceUpper]
-    );
-    
-    // Se non trova per codice_fmi, cerca per codice_accesso o codice_gara (retrocompatibilità)
-    if (eventiResult.rows.length === 0) {
-      eventiResult = await pool.query(
-        `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-         FROM eventi 
-         WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
-        [codiceUpper]
-      );
-    }
-    
-    if (eventiResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Evento non trovato' });
-    }
-    
-    const eventi = eventiResult.rows;
-    const eventoIds = eventi.map(e => e.id);
-    const codiciGara = eventi.map(e => e.codice_gara);
-    
-    // Lista piloti aggregata da tutte le gare
-    const pilotiResult = await pool.query(
-      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, p.orario_partenza, e.codice_gara
-       FROM piloti p
-       JOIN eventi e ON p.id_evento = e.id
-       WHERE p.id_evento = ANY($1)
-       ORDER BY p.numero_gara`,
-      [eventoIds]
-    );
-    
-    // Comunicati aggregati da tutte le gare
-    const comunicatiResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
-              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
-              pdf_nome
-       FROM comunicati 
-       WHERE codice_gara = ANY($1)
-       ORDER BY created_at DESC`,
-      [codiciGara]
-    );
-    
-    // Raggruppa comunicati per tipo
-    const comunicati = {
-      comunicato: comunicatiResult.rows.filter(c => c.tipo === 'comunicato'),
-      general_info: comunicatiResult.rows.filter(c => c.tipo === 'general_info'),
-      paddock_info: comunicatiResult.rows.filter(c => c.tipo === 'paddock_info')
-    };
-    
-    // Info manifestazione (prendi dal primo evento)
-    const primoEvento = eventi[0];
-    
-    console.log(`[ERTA OPEN] Codice: ${codice}, Gare: ${eventi.length}, Piloti: ${pilotiResult.rows.length}`);
-    
-    res.json({
-      success: true,
-      codice_fmi: primoEvento.codice_fmi || codice,
-      manifestazione: {
-        luogo: primoEvento.luogo,
-        data: primoEvento.data_inizio
-      },
-      gare: eventi.map(e => ({
-        codice_gara: e.codice_gara,
-        nome: e.nome_evento
-      })),
-      piloti: pilotiResult.rows,
-      comunicati: comunicati,
-      totale_piloti: pilotiResult.rows.length,
-      totale_gare: eventi.length
-    });
-    
-  } catch (err) {
-    console.error('[GET /api/app/evento/:codice/open] Error:', err.message);
     res.status(500).json({ success: false, error: 'Errore server' });
   }
 });

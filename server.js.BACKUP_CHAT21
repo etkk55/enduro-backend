@@ -204,24 +204,6 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
-      
-      // NUOVO Chat 21: Colonna codice_fmi per transcodifica FMI→FICR
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS codice_fmi VARCHAR(20);
-      `);
-    }).then(() => {
-      console.log('Colonna codice_fmi aggiunta a eventi');
-      
-      // NUOVO Chat 21b: Campi configurazione FICR per import startlist
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS ficr_anno INTEGER,
-        ADD COLUMN IF NOT EXISTS ficr_codice_equipe VARCHAR(10),
-        ADD COLUMN IF NOT EXISTS ficr_manifestazione VARCHAR(10);
-      `);
-    }).then(() => {
-      console.log('Campi FICR (anno, codice_equipe, manifestazione) aggiunti a eventi');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -339,11 +321,7 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       paddock_raggio, 
       gps_frequenza, 
       allarme_fermo_minuti,
-      codice_ddg,
-      codice_fmi,
-      ficr_anno,
-      ficr_codice_equipe,
-      ficr_manifestazione
+      codice_ddg
     } = req.body;
     
     const result = await pool.query(
@@ -353,12 +331,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         paddock_raggio = $5,
         gps_frequenza = $6,
         allarme_fermo_minuti = $7,
-        codice_ddg = $8,
-        codice_fmi = $9,
-        ficr_anno = $10,
-        ficr_codice_equipe = $11,
-        ficr_manifestazione = $12
-      WHERE id = $13 RETURNING *`,
+        codice_ddg = $8
+      WHERE id = $9 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
@@ -366,10 +340,6 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         gps_frequenza || 30,
         allarme_fermo_minuti || 10,
         codice_ddg || null,
-        codice_fmi || null,
-        ficr_anno || null,
-        ficr_codice_equipe || null,
-        ficr_manifestazione || null,
         id
       ]
     );
@@ -2524,98 +2494,6 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /api/app/comunicati/pdf] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// ============================================
-// API ERTA OPEN - Accesso senza login (Chat 21)
-// ============================================
-
-// GET info evento + piloti + comunicati (NO LOGIN) - Aggrega per codice_fmi
-app.get('/api/app/evento/:codice/open', async (req, res) => {
-  try {
-    const { codice } = req.params;
-    const codiceUpper = codice.toUpperCase();
-    
-    // Prima cerca per codice_fmi (può restituire multiple gare)
-    let eventiResult = await pool.query(
-      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-       FROM eventi 
-       WHERE UPPER(codice_fmi) = $1`,
-      [codiceUpper]
-    );
-    
-    // Se non trova per codice_fmi, cerca per codice_accesso o codice_gara (retrocompatibilità)
-    if (eventiResult.rows.length === 0) {
-      eventiResult = await pool.query(
-        `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-         FROM eventi 
-         WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
-        [codiceUpper]
-      );
-    }
-    
-    if (eventiResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Evento non trovato' });
-    }
-    
-    const eventi = eventiResult.rows;
-    const eventoIds = eventi.map(e => e.id);
-    const codiciGara = eventi.map(e => e.codice_gara);
-    
-    // Lista piloti aggregata da tutte le gare
-    const pilotiResult = await pool.query(
-      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, p.orario_partenza, e.codice_gara
-       FROM piloti p
-       JOIN eventi e ON p.id_evento = e.id
-       WHERE p.id_evento = ANY($1)
-       ORDER BY p.numero_gara`,
-      [eventoIds]
-    );
-    
-    // Comunicati aggregati da tutte le gare
-    const comunicatiResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
-              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
-              pdf_nome
-       FROM comunicati 
-       WHERE codice_gara = ANY($1)
-       ORDER BY created_at DESC`,
-      [codiciGara]
-    );
-    
-    // Raggruppa comunicati per tipo
-    const comunicati = {
-      comunicato: comunicatiResult.rows.filter(c => c.tipo === 'comunicato'),
-      general_info: comunicatiResult.rows.filter(c => c.tipo === 'general_info'),
-      paddock_info: comunicatiResult.rows.filter(c => c.tipo === 'paddock_info')
-    };
-    
-    // Info manifestazione (prendi dal primo evento)
-    const primoEvento = eventi[0];
-    
-    console.log(`[ERTA OPEN] Codice: ${codice}, Gare: ${eventi.length}, Piloti: ${pilotiResult.rows.length}`);
-    
-    res.json({
-      success: true,
-      codice_fmi: primoEvento.codice_fmi || codice,
-      manifestazione: {
-        luogo: primoEvento.luogo,
-        data: primoEvento.data_inizio
-      },
-      gare: eventi.map(e => ({
-        codice_gara: e.codice_gara,
-        nome: e.nome_evento
-      })),
-      piloti: pilotiResult.rows,
-      comunicati: comunicati,
-      totale_piloti: pilotiResult.rows.length,
-      totale_gare: eventi.length
-    });
-    
-  } catch (err) {
-    console.error('[GET /api/app/evento/:codice/open] Error:', err.message);
     res.status(500).json({ success: false, error: 'Errore server' });
   }
 });
