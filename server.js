@@ -204,6 +204,14 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
+      
+      // NUOVO Chat 21: Colonna codice_fmi per transcodifica FMI→FICR
+      return pool.query(`
+        ALTER TABLE eventi 
+        ADD COLUMN IF NOT EXISTS codice_fmi VARCHAR(20);
+      `);
+    }).then(() => {
+      console.log('Colonna codice_fmi aggiunta a eventi');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -2502,43 +2510,57 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
 // API ERTA OPEN - Accesso senza login (Chat 21)
 // ============================================
 
-// GET info evento + piloti + comunicati (NO LOGIN)
+// GET info evento + piloti + comunicati (NO LOGIN) - Aggrega per codice_fmi
 app.get('/api/app/evento/:codice/open', async (req, res) => {
   try {
     const { codice } = req.params;
+    const codiceUpper = codice.toUpperCase();
     
-    // Trova evento
-    const eventoResult = await pool.query(
-      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso 
+    // Prima cerca per codice_fmi (può restituire multiple gare)
+    let eventiResult = await pool.query(
+      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
        FROM eventi 
-       WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
-      [codice.toUpperCase()]
+       WHERE UPPER(codice_fmi) = $1`,
+      [codiceUpper]
     );
     
-    if (eventoResult.rows.length === 0) {
+    // Se non trova per codice_fmi, cerca per codice_accesso o codice_gara (retrocompatibilità)
+    if (eventiResult.rows.length === 0) {
+      eventiResult = await pool.query(
+        `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
+         FROM eventi 
+         WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
+        [codiceUpper]
+      );
+    }
+    
+    if (eventiResult.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Evento non trovato' });
     }
     
-    const evento = eventoResult.rows[0];
+    const eventi = eventiResult.rows;
+    const eventoIds = eventi.map(e => e.id);
+    const codiciGara = eventi.map(e => e.codice_gara);
     
-    // Lista piloti (solo dati pubblici)
+    // Lista piloti aggregata da tutte le gare
     const pilotiResult = await pool.query(
-      `SELECT numero_gara, cognome, nome, classe, moto, team, orario_partenza
-       FROM piloti 
-       WHERE id_evento = $1 
-       ORDER BY numero_gara`,
-      [evento.id]
+      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, p.orario_partenza, e.codice_gara
+       FROM piloti p
+       JOIN eventi e ON p.id_evento = e.id
+       WHERE p.id_evento = ANY($1)
+       ORDER BY p.numero_gara`,
+      [eventoIds]
     );
     
-    // Comunicati divisi per tipo
+    // Comunicati aggregati da tutte le gare
     const comunicatiResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, tipo,
+      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
               CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
               pdf_nome
        FROM comunicati 
-       WHERE codice_gara = $1
+       WHERE codice_gara = ANY($1)
        ORDER BY created_at DESC`,
-      [evento.codice_gara]
+      [codiciGara]
     );
     
     // Raggruppa comunicati per tipo
@@ -2548,19 +2570,26 @@ app.get('/api/app/evento/:codice/open', async (req, res) => {
       paddock_info: comunicatiResult.rows.filter(c => c.tipo === 'paddock_info')
     };
     
-    console.log(`[ERTA OPEN] Evento: ${evento.nome_evento}, Piloti: ${pilotiResult.rows.length}`);
+    // Info manifestazione (prendi dal primo evento)
+    const primoEvento = eventi[0];
+    
+    console.log(`[ERTA OPEN] Codice: ${codice}, Gare: ${eventi.length}, Piloti: ${pilotiResult.rows.length}`);
     
     res.json({
       success: true,
-      evento: {
-        nome: evento.nome_evento,
-        data: evento.data_inizio,
-        luogo: evento.luogo,
-        codice_gara: evento.codice_gara
+      codice_fmi: primoEvento.codice_fmi || codice,
+      manifestazione: {
+        luogo: primoEvento.luogo,
+        data: primoEvento.data_inizio
       },
+      gare: eventi.map(e => ({
+        codice_gara: e.codice_gara,
+        nome: e.nome_evento
+      })),
       piloti: pilotiResult.rows,
       comunicati: comunicati,
-      totale_piloti: pilotiResult.rows.length
+      totale_piloti: pilotiResult.rows.length,
+      totale_gare: eventi.length
     });
     
   } catch (err) {
