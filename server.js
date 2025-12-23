@@ -649,6 +649,114 @@ app.delete('/api/piloti/:id', async (req, res) => {
   }
 });
 
+// NUOVO Chat 21: DELETE tutti piloti di un evento
+app.delete('/api/eventi/:id_evento/piloti', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    const result = await pool.query('DELETE FROM piloti WHERE id_evento = $1', [id_evento]);
+    res.json({ 
+      message: `Eliminati ${result.rowCount} piloti`,
+      count: result.rowCount 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// NUOVO Chat 21: Import piloti da FICR startlist (crea piloti + orari)
+app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    
+    // Recupera parametri FICR dall'evento
+    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    const evento = eventoRes.rows[0];
+    
+    const anno = evento.ficr_anno || new Date().getFullYear();
+    const equipe = evento.ficr_codice_equipe;
+    const manif = evento.ficr_manifestazione;
+    const codiceGara = evento.codice_gara; // es. "303-1", "303-2"
+    
+    if (!equipe || !manif) {
+      return res.status(400).json({ 
+        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione.' 
+      });
+    }
+    
+    // Estrai categoria FICR dal codice_gara (303-1 -> 1, 303-2 -> 2)
+    const categoriaFicr = codiceGara ? codiceGara.split('-')[1] : '1';
+    
+    // Chiama API FICR startlist
+    const ficrUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoriaFicr}/1/1/*/*/*/*/*`;
+    console.log('Import piloti FICR URL:', ficrUrl);
+    
+    const response = await fetch(ficrUrl);
+    if (!response.ok) {
+      return res.status(502).json({ error: `Errore API FICR: ${response.status}` });
+    }
+    
+    const startlist = await response.json();
+    
+    if (!startlist || !Array.isArray(startlist) || startlist.length === 0) {
+      return res.json({ 
+        message: 'Nessun pilota trovato nella startlist FICR',
+        created: 0,
+        updated: 0
+      });
+    }
+    
+    let created = 0;
+    let updated = 0;
+    
+    for (const pilota of startlist) {
+      const numeroGara = pilota.Numero;
+      const cognome = pilota.Cognome;
+      const nome = pilota.Nome;
+      const classe = pilota.Classe || '';
+      const moto = pilota.Moto || '';
+      const team = pilota.Scuderia || pilota.MotoClub || '';
+      const orarioPartenza = pilota.Orario || null;
+      
+      // Verifica se pilota esiste già
+      const existingRes = await pool.query(
+        'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+        [id_evento, numeroGara]
+      );
+      
+      if (existingRes.rows.length > 0) {
+        // Aggiorna pilota esistente
+        await pool.query(`
+          UPDATE piloti SET 
+            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6
+          WHERE id_evento = $7 AND numero_gara = $8
+        `, [cognome, nome, classe, moto, team, orarioPartenza, id_evento, numeroGara]);
+        updated++;
+      } else {
+        // Crea nuovo pilota
+        await pool.query(`
+          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
+        created++;
+      }
+    }
+    
+    res.json({
+      message: `Import completato: ${created} creati, ${updated} aggiornati`,
+      created,
+      updated,
+      total: startlist.length
+    });
+    
+  } catch (err) {
+    console.error('Errore import piloti FICR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== PROVE SPECIALI ====================
 
 // GET prove per evento
