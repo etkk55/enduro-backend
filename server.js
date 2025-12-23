@@ -2499,6 +2499,77 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
 });
 
 // ============================================
+// API ERTA OPEN - Accesso senza login (Chat 21)
+// ============================================
+
+// GET info evento + piloti + comunicati (NO LOGIN)
+app.get('/api/app/evento/:codice/open', async (req, res) => {
+  try {
+    const { codice } = req.params;
+    
+    // Trova evento
+    const eventoResult = await pool.query(
+      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso 
+       FROM eventi 
+       WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
+      [codice.toUpperCase()]
+    );
+    
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Evento non trovato' });
+    }
+    
+    const evento = eventoResult.rows[0];
+    
+    // Lista piloti (solo dati pubblici)
+    const pilotiResult = await pool.query(
+      `SELECT numero_gara, cognome, nome, classe, moto, team, orario_partenza
+       FROM piloti 
+       WHERE id_evento = $1 
+       ORDER BY numero_gara`,
+      [evento.id]
+    );
+    
+    // Comunicati divisi per tipo
+    const comunicatiResult = await pool.query(
+      `SELECT id, numero, ora, data, testo, tipo,
+              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
+              pdf_nome
+       FROM comunicati 
+       WHERE codice_gara = $1
+       ORDER BY created_at DESC`,
+      [evento.codice_gara]
+    );
+    
+    // Raggruppa comunicati per tipo
+    const comunicati = {
+      comunicato: comunicatiResult.rows.filter(c => c.tipo === 'comunicato'),
+      general_info: comunicatiResult.rows.filter(c => c.tipo === 'general_info'),
+      paddock_info: comunicatiResult.rows.filter(c => c.tipo === 'paddock_info')
+    };
+    
+    console.log(`[ERTA OPEN] Evento: ${evento.nome_evento}, Piloti: ${pilotiResult.rows.length}`);
+    
+    res.json({
+      success: true,
+      evento: {
+        nome: evento.nome_evento,
+        data: evento.data_inizio,
+        luogo: evento.luogo,
+        codice_gara: evento.codice_gara
+      },
+      piloti: pilotiResult.rows,
+      comunicati: comunicati,
+      totale_piloti: pilotiResult.rows.length
+    });
+    
+  } catch (err) {
+    console.error('[GET /api/app/evento/:codice/open] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// ============================================
 // FINE API APP ERTA
 // ============================================
 
