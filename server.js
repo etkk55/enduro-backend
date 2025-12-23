@@ -1796,7 +1796,13 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       return res.status(400).json({ error: 'Parametri mancanti: id_evento e xml_content richiesti' });
     }
     
-    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}`);
+    // NUOVO Chat 21b: Recupera codice_gara per filtrare per categoria
+    const eventoRes = await pool.query('SELECT codice_gara FROM eventi WHERE id = $1', [id_evento]);
+    const codiceGara = eventoRes.rows[0]?.codice_gara || '';
+    const isTraining = codiceGara.includes('-2');  // 303-2 = Training
+    const isEpoca = codiceGara.includes('-3');     // 303-3 = Epoca
+    
+    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}, codice_gara=${codiceGara}, isTraining=${isTraining}, isEpoca=${isEpoca}`);
     
     // Decodifica base64 se necessario
     let xmlText = xml_content;
@@ -1819,10 +1825,11 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       return res.status(400).json({ error: 'Nessun conduttore trovato nel file XML' });
     }
     
-    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori`);
+    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori nel file`);
     
     let pilotiImportati = 0;
     let pilotiAggiornati = 0;
+    let pilotiSaltati = 0;
     let errori = [];
     
     for (const conduttoreXml of conduttoriMatch) {
@@ -1849,7 +1856,28 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
           continue;
         }
         
-        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome}`);
+        // NUOVO Chat 21b: Filtra per categoria gara
+        const isClasseTU = classe === 'TU';
+        
+        if (isTraining && !isClasseTU) {
+          // Training: importa SOLO classe TU
+          pilotiSaltati++;
+          continue;
+        }
+        
+        if (!isTraining && !isEpoca && isClasseTU) {
+          // Campionato: importa TUTTI tranne classe TU
+          pilotiSaltati++;
+          continue;
+        }
+        
+        if (isEpoca) {
+          // Epoca: questo XML non contiene piloti Epoca, saltare tutto
+          pilotiSaltati++;
+          continue;
+        }
+        
+        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome} (classe: ${classe})`);
         
         // Verifica se pilota esiste già
         const existingResult = await pool.query(
@@ -1883,13 +1911,15 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       }
     }
     
-    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati`);
+    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati, ${pilotiSaltati} saltati (filtro categoria)`);
     
     res.json({
       success: true,
       piloti_importati: pilotiImportati,
       piloti_aggiornati: pilotiAggiornati,
+      piloti_saltati: pilotiSaltati,
       totale_processati: conduttoriMatch.length,
+      filtro: isTraining ? 'Solo classe TU (Training)' : isEpoca ? 'Epoca (non supportato)' : 'Esclusa classe TU',
       errori: errori.length > 0 ? errori : undefined
     });
     
