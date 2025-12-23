@@ -329,7 +329,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       paddock_raggio, 
       gps_frequenza, 
       allarme_fermo_minuti,
-      codice_ddg
+      codice_ddg,
+      codice_fmi
     } = req.body;
     
     const result = await pool.query(
@@ -339,8 +340,9 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         paddock_raggio = $5,
         gps_frequenza = $6,
         allarme_fermo_minuti = $7,
-        codice_ddg = $8
-      WHERE id = $9 RETURNING *`,
+        codice_ddg = $8,
+        codice_fmi = $9
+      WHERE id = $10 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
@@ -348,6 +350,7 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         gps_frequenza || 30,
         allarme_fermo_minuti || 10,
         codice_ddg || null,
+        codice_fmi || null,
         id
       ]
     );
