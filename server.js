@@ -2679,6 +2679,21 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
       .sort((a, b) => a.sortKey - b.sortKey)
       .map(({ sortKey, ...t }) => t);
     
+    // NUOVO Chat 22: Cancella tempi dal DB (li abbiamo in memoria)
+    const proveResult = await pool.query(
+      'SELECT id FROM prove_speciali WHERE id_evento = $1',
+      [id]
+    );
+    const proveIds = proveResult.rows.map(p => p.id);
+    
+    if (proveIds.length > 0) {
+      await pool.query(
+        'DELETE FROM tempi WHERE id_ps = ANY($1)',
+        [proveIds]
+      );
+      console.log(`[SIMULATE-RESET] Cancellati ${tempiResult.rows.length} tempi dal DB`);
+    }
+    
     // Salva stato simulazione
     simulationState[id] = {
       tempiTotali: tempiShuffled,
@@ -2690,7 +2705,7 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
     
     res.json({
       success: true,
-      message: 'Simulazione resettata',
+      message: 'Simulazione resettata - tempi cancellati dal DB',
       tempiTotali: tempiShuffled.length,
       tempiRilasciati: 0,
       tempiRimanenti: tempiShuffled.length
@@ -2708,44 +2723,12 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
   const batchSize = parseInt(req.query.batch) || 15; // Default 15 tempi per batch
   
   try {
-    // Se non c'è simulazione attiva, la inizializza
+    // Se non c'è simulazione attiva, errore (deve fare reset prima)
     if (!simulationState[id]) {
-      // Auto-reset
-      const tempiResult = await pool.query(
-        `SELECT t.id, t.id_pilota, t.id_ps, t.tempo_secondi, t.penalita_secondi,
-                p.numero_gara, p.nome, p.cognome, p.classe,
-                ps.numero_ordine, ps.nome_ps
-         FROM tempi t
-         JOIN piloti p ON t.id_pilota = p.id
-         JOIN prove_speciali ps ON t.id_ps = ps.id
-         WHERE ps.id_evento = $1
-         ORDER BY ps.numero_ordine, t.tempo_secondi`,
-        [id]
-      );
-      
-      if (tempiResult.rows.length === 0) {
-        return res.json({
-          success: true,
-          nuoviTempi: [],
-          tempiTotali: 0,
-          tempiRilasciati: 0,
-          tempiRimanenti: 0,
-          simulazioneCompleta: true
-        });
-      }
-      
-      const tempiShuffled = tempiResult.rows
-        .map(t => ({ ...t, sortKey: Math.random() }))
-        .sort((a, b) => a.sortKey - b.sortKey)
-        .map(({ sortKey, ...t }) => t);
-      
-      simulationState[id] = {
-        tempiTotali: tempiShuffled,
-        tempiRilasciati: [],
-        indiceCorrente: 0,
-        inizioSimulazione: new Date(),
-        ultimoPolling: null
-      };
+      return res.status(400).json({
+        success: false,
+        error: 'Nessuna simulazione attiva. Esegui prima Inizializza/Reset.'
+      });
     }
     
     const state = simulationState[id];
@@ -2759,12 +2742,25 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
     const endIdx = Math.min(startIdx + actualBatch, state.tempiTotali.length);
     const nuoviTempi = state.tempiTotali.slice(startIdx, endIdx);
     
+    // NUOVO Chat 22: Reinserisci tempi nel DB
+    for (const tempo of nuoviTempi) {
+      await pool.query(
+        `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id_pilota, id_ps) 
+         DO UPDATE SET tempo_secondi = $3, penalita_secondi = $4`,
+        [tempo.id_pilota, tempo.id_ps, tempo.tempo_secondi, tempo.penalita_secondi || 0]
+      );
+    }
+    
     // Aggiorna stato
     state.indiceCorrente = endIdx;
     state.tempiRilasciati = state.tempiRilasciati.concat(nuoviTempi);
     state.ultimoPolling = new Date();
     
     const simulazioneCompleta = state.indiceCorrente >= state.tempiTotali.length;
+    
+    console.log(`[SIMULATE-POLL] Rilasciati ${nuoviTempi.length} tempi (${state.indiceCorrente}/${state.tempiTotali.length})`);
     
     res.json({
       success: true,
