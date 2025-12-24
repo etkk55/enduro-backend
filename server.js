@@ -757,6 +757,189 @@ app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
   }
 });
 
+// NUOVO Chat 22: Import FICR per TUTTE le gare fratelle (3 modalità)
+app.post('/api/eventi/:id_evento/import-ficr-tutte', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    const { modalita } = req.body; // 'program' | 'entrylist' | 'startlist'
+    
+    if (!['program', 'entrylist', 'startlist'].includes(modalita)) {
+      return res.status(400).json({ error: 'Modalità non valida. Usa: program, entrylist, startlist' });
+    }
+    
+    // Recupera evento e parametri FICR
+    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    const evento = eventoRes.rows[0];
+    
+    const anno = evento.ficr_anno || new Date().getFullYear();
+    const equipe = evento.ficr_codice_equipe;
+    const manif = evento.ficr_manifestazione;
+    
+    if (!equipe || !manif) {
+      return res.status(400).json({ 
+        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione.' 
+      });
+    }
+    
+    // Trova TUTTE le gare fratelle (303-1, 303-2, 303-3)
+    const prefisso = evento.codice_gara.split('-')[0];
+    const gareFratelleRes = await pool.query(
+      "SELECT * FROM eventi WHERE codice_gara LIKE $1 ORDER BY codice_gara",
+      [prefisso + '-%']
+    );
+    const gareFratelle = gareFratelleRes.rows;
+    
+    console.log(`[IMPORT-FICR-TUTTE] Modalità: ${modalita}, Gare fratelle: ${gareFratelle.map(g => g.codice_gara).join(', ')}`);
+    
+    const risultati = {};
+    
+    for (const gara of gareFratelle) {
+      // Estrai categoria dal codice gara (303-1 -> 1, 303-2 -> 2, etc.)
+      const categoria = parseInt(gara.codice_gara.split('-')[1]) || 1;
+      
+      let apiUrl;
+      let pilotiData = [];
+      
+      try {
+        if (modalita === 'program') {
+          // T-5: Programma di gara
+          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manif}/${categoria}`;
+        } else if (modalita === 'entrylist') {
+          // T-2: Numeri di gara
+          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
+        } else {
+          // T-1: Ordine di partenza
+          apiUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoria}/1/1/*/*/*/*/*`;
+        }
+        
+        console.log(`[IMPORT-FICR-TUTTE] ${gara.codice_gara} -> ${apiUrl}`);
+        
+        const apiRes = await fetch(apiUrl);
+        if (apiRes.ok) {
+          pilotiData = await apiRes.json();
+        }
+      } catch (e) {
+        console.log(`[IMPORT-FICR-TUTTE] Errore API per ${gara.codice_gara}:`, e.message);
+      }
+      
+      if (!Array.isArray(pilotiData) || pilotiData.length === 0) {
+        risultati[gara.codice_gara] = { created: 0, updated: 0, message: 'Nessun dato disponibile' };
+        continue;
+      }
+      
+      let created = 0;
+      let updated = 0;
+      
+      for (const pilota of pilotiData) {
+        const numeroGara = pilota.Numero;
+        const cognome = pilota.Cognome || '';
+        const nome = pilota.Nome || '';
+        const classe = pilota.Classe || '';
+        const moto = pilota.Moto || '';
+        const team = pilota.Scuderia || pilota.MotoClub || '';
+        const orarioPartenza = pilota.Orario || null;
+        
+        if (!numeroGara) continue;
+        
+        // Verifica se pilota esiste già
+        const existingRes = await pool.query(
+          'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+          [gara.id, numeroGara]
+        );
+        
+        if (existingRes.rows.length > 0) {
+          // Aggiorna pilota esistente
+          if (modalita === 'startlist') {
+            // Solo orario per startlist
+            await pool.query(
+              'UPDATE piloti SET orario_partenza = $1 WHERE id_evento = $2 AND numero_gara = $3',
+              [orarioPartenza, gara.id, numeroGara]
+            );
+          } else {
+            await pool.query(`
+              UPDATE piloti SET 
+                cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = COALESCE($6, orario_partenza)
+              WHERE id_evento = $7 AND numero_gara = $8
+            `, [cognome, nome, classe, moto, team, orarioPartenza, gara.id, numeroGara]);
+          }
+          updated++;
+        } else {
+          // Crea nuovo pilota
+          await pool.query(`
+            INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `, [gara.id, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
+          created++;
+        }
+      }
+      
+      risultati[gara.codice_gara] = { created, updated, total: pilotiData.length };
+    }
+    
+    // Calcola totali
+    let totCreated = 0, totUpdated = 0;
+    Object.values(risultati).forEach(r => {
+      totCreated += r.created || 0;
+      totUpdated += r.updated || 0;
+    });
+    
+    res.json({
+      success: true,
+      modalita,
+      risultati,
+      totali: { created: totCreated, updated: totUpdated },
+      message: `Import ${modalita}: ${totCreated} creati, ${totUpdated} aggiornati`
+    });
+    
+  } catch (err) {
+    console.error('[IMPORT-FICR-TUTTE] Errore:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// NUOVO Chat 22: Cancella piloti da TUTTE le gare fratelle
+app.delete('/api/eventi/:id_evento/piloti-tutte', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    
+    // Recupera evento
+    const eventoRes = await pool.query('SELECT codice_gara FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    
+    // Trova TUTTE le gare fratelle
+    const prefisso = eventoRes.rows[0].codice_gara.split('-')[0];
+    const gareFratelleRes = await pool.query(
+      "SELECT id, codice_gara FROM eventi WHERE codice_gara LIKE $1",
+      [prefisso + '-%']
+    );
+    
+    const risultati = {};
+    let totale = 0;
+    
+    for (const gara of gareFratelleRes.rows) {
+      const deleteRes = await pool.query('DELETE FROM piloti WHERE id_evento = $1', [gara.id]);
+      risultati[gara.codice_gara] = deleteRes.rowCount;
+      totale += deleteRes.rowCount;
+    }
+    
+    res.json({
+      success: true,
+      message: `Eliminati ${totale} piloti da tutte le gare`,
+      risultati,
+      totale
+    });
+    
+  } catch (err) {
+    console.error('[DELETE-PILOTI-TUTTE] Errore:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // NUOVO Chat 22: Import completo da FICR (entrylist + startlist) per una categoria specifica
 app.post('/api/eventi/:id_evento/import-completo-ficr', async (req, res) => {
   try {
