@@ -698,7 +698,9 @@ app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
       return res.status(502).json({ error: `Errore API FICR: ${response.status}` });
     }
     
-    const startlist = await response.json();
+    const jsonResponse = await response.json();
+    // FICR restituisce { code: 200, status: true, data: [...] }
+    const startlist = jsonResponse.data || jsonResponse;
     
     if (!startlist || !Array.isArray(startlist) || startlist.length === 0) {
       return res.json({ 
@@ -805,8 +807,8 @@ app.post('/api/eventi/:id_evento/import-ficr-tutte', async (req, res) => {
       
       try {
         if (modalita === 'program') {
-          // T-5: Programma di gara
-          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manif}/${categoria}`;
+          // T-5: Usa entrylist per caricare piloti base (program contiene solo prove speciali)
+          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
         } else if (modalita === 'entrylist') {
           // T-2: Numeri di gara
           apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
@@ -819,7 +821,10 @@ app.post('/api/eventi/:id_evento/import-ficr-tutte', async (req, res) => {
         
         const apiRes = await fetch(apiUrl);
         if (apiRes.ok) {
-          pilotiData = await apiRes.json();
+          const jsonResponse = await apiRes.json();
+          // FICR restituisce { code: 200, status: true, data: [...] }
+          pilotiData = jsonResponse.data || jsonResponse;
+          if (!Array.isArray(pilotiData)) pilotiData = [];
         }
       } catch (e) {
         console.log(`[IMPORT-FICR-TUTTE] Errore API per ${gara.codice_gara}:`, e.message);
@@ -839,7 +844,7 @@ app.post('/api/eventi/:id_evento/import-ficr-tutte', async (req, res) => {
         const nome = pilota.Nome || '';
         const classe = pilota.Classe || '';
         const moto = pilota.Moto || '';
-        const team = pilota.Scuderia || pilota.MotoClub || '';
+        const team = pilota.Motoclub || pilota.Scuderia || pilota.MotoClub || '';
         const orarioPartenza = pilota.Orario || null;
         
         if (!numeroGara) continue;
@@ -977,7 +982,9 @@ app.post('/api/eventi/:id_evento/import-completo-ficr', async (req, res) => {
     if (!entrylistRes.ok) {
       return res.status(502).json({ error: `Errore API FICR entrylist: ${entrylistRes.status}` });
     }
-    const entrylist = await entrylistRes.json();
+    const entrylistJson = await entrylistRes.json();
+    // FICR restituisce { code: 200, status: true, data: [...] }
+    const entrylist = entrylistJson.data || entrylistJson;
     
     // 2. Chiama STARTLIST per ottenere gli orari (se disponibili)
     const startlistUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoria}/1/1/*/*/*/*/*`;
@@ -987,7 +994,8 @@ app.post('/api/eventi/:id_evento/import-completo-ficr', async (req, res) => {
     try {
       const startlistRes = await fetch(startlistUrl);
       if (startlistRes.ok) {
-        startlist = await startlistRes.json();
+        const startlistJson = await startlistRes.json();
+        startlist = startlistJson.data || startlistJson;
       }
     } catch (e) {
       console.log('[IMPORT-FICR] Startlist non disponibile:', e.message);
