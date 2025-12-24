@@ -2962,15 +2962,17 @@ app.get('/api/app/miei-tempi/:codice_accesso/:numero_pilota', async (req, res) =
     );
     
     // Calcola classifica assoluta
+    // FIX Chat 22: Prima ordina per numero PS fatte (DESC), poi per tempo (ASC)
     const classificaResult = await pool.query(
       `SELECT p.id, p.numero_gara, p.cognome, p.nome, p.classe,
+              COUNT(t.id) as ps_fatte,
               SUM(t.tempo_secondi) as tempo_totale
        FROM piloti p
        JOIN tempi t ON t.id_pilota = p.id
        WHERE p.id_evento = $1
        GROUP BY p.id
        HAVING SUM(t.tempo_secondi) > 0
-       ORDER BY tempo_totale ASC`,
+       ORDER BY ps_fatte DESC, tempo_totale ASC`,
       [evento.id]
     );
     
