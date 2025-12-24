@@ -4277,7 +4277,12 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     
     // 1. Trova evento e tempi settore
     const eventoResult = await pool.query(
-      'SELECT e.*, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
+      `SELECT e.id as evento_id, e.nome_evento, e.codice_gara, e.data_inizio,
+              ts.co1_attivo, ts.co2_attivo, ts.co3_attivo,
+              ts.tempo_par_co1, ts.tempo_co1_co2, ts.tempo_co2_co3, ts.tempo_ultimo_arr
+       FROM eventi e 
+       LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 
+       WHERE e.codice_gara = $1`,
       [codice_gara]
     );
     
@@ -4290,7 +4295,7 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     // 2. Trova pilota con orario partenza
     const pilotaResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-      [evento.id, numero_pilota]
+      [evento.evento_id, numero_pilota]
     );
     
     if (pilotaResult.rows.length === 0) {
