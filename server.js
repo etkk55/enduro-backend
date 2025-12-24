@@ -1359,6 +1359,136 @@ app.post('/api/ficr/import-tempi', async (req, res) => {
   }
 });
 
+// POST import TUTTI i tempi archiviati da FICR per un evento (Chat 22)
+app.post('/api/eventi/:id/import-tempi-archiviati', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    console.log(`[IMPORT-TEMPI] Inizio import per evento ${id}`);
+    
+    // 1. Carica evento con parametri FICR
+    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id]);
+    if (eventoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    
+    const evento = eventoResult.rows[0];
+    const { ficr_anno, ficr_codice_equipe, ficr_manifestazione } = evento;
+    
+    if (!ficr_anno || !ficr_codice_equipe || !ficr_manifestazione) {
+      return res.status(400).json({ error: 'Parametri FICR mancanti (anno, equipe, manifestazione)' });
+    }
+    
+    // Determina categoria/giorno dalla gara (1=Campionato, 2=Training, 3=Epoca)
+    let categoriaFicr = 1;
+    if (evento.codice_gara) {
+      const match = evento.codice_gara.match(/-(\d+)$/);
+      if (match) categoriaFicr = parseInt(match[1]);
+    }
+    
+    console.log(`[IMPORT-TEMPI] Evento: ${evento.nome_evento}`);
+    console.log(`[IMPORT-TEMPI] FICR: anno=${ficr_anno} equipe=${ficr_codice_equipe} manif=${ficr_manifestazione} cat=${categoriaFicr}`);
+    
+    // 2. Carica prove speciali dell'evento
+    const proveResult = await pool.query(
+      'SELECT id, nome_ps, numero_ordine FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
+      [id]
+    );
+    
+    if (proveResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Nessuna prova speciale trovata' });
+    }
+    
+    console.log(`[IMPORT-TEMPI] Trovate ${proveResult.rows.length} prove speciali`);
+    
+    // 3. Carica piloti per mapping numero_gara -> id
+    const pilotiResult = await pool.query(
+      'SELECT id, numero_gara FROM piloti WHERE id_evento = $1',
+      [id]
+    );
+    
+    const pilotiMap = {};
+    pilotiResult.rows.forEach(p => {
+      pilotiMap[p.numero_gara] = p.id;
+    });
+    
+    console.log(`[IMPORT-TEMPI] Trovati ${pilotiResult.rows.length} piloti`);
+    
+    // 4. Per ogni prova, chiama FICR e importa tempi
+    let totaleTempi = 0;
+    const risultatiProve = [];
+    
+    for (const prova of proveResult.rows) {
+      const numeroOrdine = prova.numero_ordine;
+      
+      // Chiama API FICR per questa prova
+      const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${ficr_anno}/${ficr_codice_equipe}/${ficr_manifestazione}/${categoriaFicr}/${numeroOrdine}/1/*/*/*/*/*`;
+      
+      console.log(`[IMPORT-TEMPI] Chiamo FICR per ${prova.nome_ps}: ${url}`);
+      
+      try {
+        const response = await axios.get(url);
+        
+        if (!response.data?.data?.clasdella || response.data.data.clasdella.length === 0) {
+          console.log(`[IMPORT-TEMPI] ${prova.nome_ps}: nessun tempo trovato`);
+          risultatiProve.push({ prova: prova.nome_ps, tempi: 0, status: 'empty' });
+          continue;
+        }
+        
+        const tempiFicr = response.data.data.clasdella;
+        let tempiProva = 0;
+        
+        for (const tempoFICR of tempiFicr) {
+          const idPilota = pilotiMap[tempoFICR.Numero];
+          if (!idPilota) continue;
+          
+          const tempoStr = tempoFICR.Tempo;
+          if (!tempoStr) continue;
+          
+          // Parse tempo formato "4'41.21" o "0'00.00"
+          const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
+          if (!match) continue;
+          
+          const tempoSecondi = parseInt(match[1]) * 60 + parseFloat(match[2]);
+          if (tempoSecondi === 0) continue; // Salta tempi nulli
+          
+          // Salva nel DB
+          await pool.query(
+            `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
+             VALUES ($1, $2, $3, 0)
+             ON CONFLICT (id_pilota, id_ps) 
+             DO UPDATE SET tempo_secondi = $3`,
+            [idPilota, prova.id, tempoSecondi]
+          );
+          
+          tempiProva++;
+        }
+        
+        console.log(`[IMPORT-TEMPI] ${prova.nome_ps}: ${tempiProva} tempi importati`);
+        risultatiProve.push({ prova: prova.nome_ps, tempi: tempiProva, status: 'ok' });
+        totaleTempi += tempiProva;
+        
+      } catch (err) {
+        console.error(`[IMPORT-TEMPI] Errore ${prova.nome_ps}:`, err.message);
+        risultatiProve.push({ prova: prova.nome_ps, tempi: 0, status: 'error', error: err.message });
+      }
+    }
+    
+    console.log(`[IMPORT-TEMPI] Completato: ${totaleTempi} tempi totali importati`);
+    
+    res.json({
+      success: true,
+      evento: evento.nome_evento,
+      tempiTotali: totaleTempi,
+      prove: risultatiProve
+    });
+    
+  } catch (err) {
+    console.error('[IMPORT-TEMPI] Errore generale:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== CATEGORIE ====================
 
 app.get('/api/categorie', async (req, res) => {
