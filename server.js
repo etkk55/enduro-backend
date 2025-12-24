@@ -3090,6 +3090,301 @@ app.get('/api/app/evento/:codice/open', async (req, res) => {
 });
 
 // ============================================
+// NUOVO Chat 22: API ERTA PUBBLICO (senza autenticazione pilota)
+// ============================================
+
+// Funzione helper per trovare gare da codice FMI pubblico
+async function trovaGareDaCodicePubblico(codice) {
+  const codiceUpper = codice.toUpperCase().trim();
+  
+  // Cerca in codice_fmi
+  let result = await pool.query(
+    `SELECT * FROM eventi WHERE UPPER(codice_fmi) = $1`,
+    [codiceUpper]
+  );
+  
+  // Se non trova, cerca in codice_accesso_pubblico (può contenere multipli separati da virgola)
+  if (result.rows.length === 0) {
+    result = await pool.query(
+      `SELECT * FROM eventi WHERE UPPER(codice_accesso_pubblico) LIKE $1`,
+      [`%${codiceUpper}%`]
+    );
+  }
+  
+  // Fallback: cerca per codice_gara o codice_accesso
+  if (result.rows.length === 0) {
+    result = await pool.query(
+      `SELECT * FROM eventi WHERE UPPER(codice_gara) = $1 OR UPPER(codice_accesso) = $1`,
+      [codiceUpper]
+    );
+  }
+  
+  return result.rows;
+}
+
+// 1. LOGIN PUBBLICO - Solo codice FMI
+app.post('/api/app/login-pubblico', async (req, res) => {
+  try {
+    const { codice_fmi } = req.body;
+    
+    if (!codice_fmi) {
+      return res.status(400).json({ success: false, error: 'Codice FMI richiesto' });
+    }
+    
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    res.json({
+      success: true,
+      isPublic: true,
+      codice_fmi: codice_fmi.toUpperCase(),
+      gare: gare.map(g => ({
+        id: g.id,
+        codice_gara: g.codice_gara,
+        nome: g.nome_evento,
+        data: g.data_inizio,
+        luogo: g.luogo
+      }))
+    });
+  } catch (err) {
+    console.error('[POST /api/app/login-pubblico] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// 2. ISCRITTI PUBBLICO - Lista piloti ordinata per cognome
+app.get('/api/app/pubblico/iscritti/:codice_fmi', async (req, res) => {
+  try {
+    const { codice_fmi } = req.params;
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    const eventoIds = gare.map(g => g.id);
+    
+    const pilotiResult = await pool.query(
+      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, e.codice_gara
+       FROM piloti p
+       JOIN eventi e ON p.id_evento = e.id
+       WHERE p.id_evento = ANY($1)
+       ORDER BY p.cognome, p.nome`,
+      [eventoIds]
+    );
+    
+    res.json({
+      success: true,
+      totale: pilotiResult.rows.length,
+      piloti: pilotiResult.rows.map(p => ({
+        numero: p.numero_gara,
+        cognome: p.cognome,
+        nome: p.nome,
+        classe: p.classe,
+        moto: p.moto,
+        team: p.team,
+        gara: p.codice_gara
+      }))
+    });
+  } catch (err) {
+    console.error('[GET /api/app/pubblico/iscritti] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// 3. ORDINE PARTENZA PUBBLICO - Lista piloti ordinata per orario
+app.get('/api/app/pubblico/ordine/:codice_fmi', async (req, res) => {
+  try {
+    const { codice_fmi } = req.params;
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    const eventoIds = gare.map(g => g.id);
+    
+    const pilotiResult = await pool.query(
+      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.orario_partenza, e.codice_gara
+       FROM piloti p
+       JOIN eventi e ON p.id_evento = e.id
+       WHERE p.id_evento = ANY($1) AND p.orario_partenza IS NOT NULL
+       ORDER BY p.orario_partenza, p.numero_gara`,
+      [eventoIds]
+    );
+    
+    res.json({
+      success: true,
+      totale: pilotiResult.rows.length,
+      partenze: pilotiResult.rows.map(p => ({
+        numero: p.numero_gara,
+        cognome: p.cognome,
+        nome: p.nome,
+        classe: p.classe,
+        orario: p.orario_partenza ? p.orario_partenza.substring(0, 5) : null,
+        gara: p.codice_gara
+      }))
+    });
+  } catch (err) {
+    console.error('[GET /api/app/pubblico/ordine] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// 4. PROGRAMMA PUBBLICO - Prove speciali da FICR
+app.get('/api/app/pubblico/programma/:codice_fmi', async (req, res) => {
+  try {
+    const { codice_fmi } = req.params;
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    // Prende parametri FICR dalla prima gara
+    const gara = gare[0];
+    const anno = gara.ficr_anno || new Date().getFullYear();
+    const equipe = gara.ficr_codice_equipe;
+    const manif = gara.ficr_manifestazione;
+    
+    if (!equipe || !manif) {
+      return res.json({
+        success: true,
+        prove: [],
+        message: 'Parametri FICR non configurati'
+      });
+    }
+    
+    // Estrai categoria dal codice gara (303-1 -> 1)
+    const categoria = parseInt(gara.codice_gara.split('-')[1]) || 1;
+    
+    // Chiama API FICR program
+    const apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manif}/${categoria}`;
+    console.log('[PROGRAMMA PUBBLICO] Chiamata FICR:', apiUrl);
+    
+    try {
+      const ficrRes = await fetch(apiUrl);
+      if (ficrRes.ok) {
+        const ficrData = await ficrRes.json();
+        const prove = ficrData.data || ficrData || [];
+        
+        res.json({
+          success: true,
+          gara: gara.nome_evento,
+          prove: Array.isArray(prove) ? prove.map(p => ({
+            sigla: p.Sigla,
+            descrizione: p.Description,
+            lunghezza: p.Length,
+            data: p.Data
+          })) : []
+        });
+      } else {
+        res.json({ success: true, prove: [], message: 'Programma non disponibile da FICR' });
+      }
+    } catch (ficrErr) {
+      console.error('[PROGRAMMA PUBBLICO] Errore FICR:', ficrErr.message);
+      res.json({ success: true, prove: [], message: 'Programma non disponibile' });
+    }
+  } catch (err) {
+    console.error('[GET /api/app/pubblico/programma] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// 5. COMUNICATI PUBBLICO - Comunicati di gara
+app.get('/api/app/pubblico/comunicati/:codice_fmi', async (req, res) => {
+  try {
+    const { codice_fmi } = req.params;
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    const codiciGara = gare.map(g => g.codice_gara);
+    
+    const comunicatiResult = await pool.query(
+      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
+              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
+              pdf_nome, created_at
+       FROM comunicati
+       WHERE codice_gara = ANY($1) AND (tipo = 'comunicato' OR tipo IS NULL)
+       ORDER BY created_at DESC`,
+      [codiciGara]
+    );
+    
+    res.json({
+      success: true,
+      totale: comunicatiResult.rows.length,
+      comunicati: comunicatiResult.rows.map(c => ({
+        id: c.id,
+        numero: c.numero,
+        ora: c.ora,
+        data: c.data,
+        testo: c.testo,
+        gara: c.codice_gara,
+        ha_pdf: c.ha_pdf,
+        pdf_nome: c.pdf_nome,
+        created_at: c.created_at
+      }))
+    });
+  } catch (err) {
+    console.error('[GET /api/app/pubblico/comunicati] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// 6. SERVIZIO PUBBLICO - Comunicazioni di servizio (tipo = 'servizio')
+app.get('/api/app/pubblico/servizio/:codice_fmi', async (req, res) => {
+  try {
+    const { codice_fmi } = req.params;
+    const gare = await trovaGareDaCodicePubblico(codice_fmi);
+    
+    if (gare.length === 0) {
+      return res.status(404).json({ success: false, error: 'Codice non valido' });
+    }
+    
+    const codiciGara = gare.map(g => g.codice_gara);
+    
+    const servizioResult = await pool.query(
+      `SELECT id, numero, ora, data, testo, codice_gara,
+              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
+              pdf_nome, created_at
+       FROM comunicati
+       WHERE codice_gara = ANY($1) AND tipo = 'servizio'
+       ORDER BY created_at DESC`,
+      [codiciGara]
+    );
+    
+    res.json({
+      success: true,
+      totale: servizioResult.rows.length,
+      comunicazioni: servizioResult.rows.map(c => ({
+        id: c.id,
+        numero: c.numero,
+        ora: c.ora,
+        data: c.data,
+        testo: c.testo,
+        gara: c.codice_gara,
+        ha_pdf: c.ha_pdf,
+        pdf_nome: c.pdf_nome,
+        created_at: c.created_at
+      }))
+    });
+  } catch (err) {
+    console.error('[GET /api/app/pubblico/servizio] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore server' });
+  }
+});
+
+// ============================================
+// FINE API APP ERTA PUBBLICO
+// ============================================
+
+// ============================================
 // FINE API APP ERTA
 // ============================================
 
