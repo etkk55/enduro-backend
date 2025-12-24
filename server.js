@@ -757,6 +757,135 @@ app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
   }
 });
 
+// NUOVO Chat 22: Import completo da FICR (entrylist + startlist) per una categoria specifica
+app.post('/api/eventi/:id_evento/import-completo-ficr', async (req, res) => {
+  try {
+    const { id_evento } = req.params;
+    const { categoria } = req.body; // 1=Campionato, 2=Training, 3=Epoca
+    
+    if (!categoria) {
+      return res.status(400).json({ error: 'Categoria richiesta (1, 2 o 3)' });
+    }
+    
+    // Recupera parametri FICR dall'evento
+    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
+    if (eventoRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Evento non trovato' });
+    }
+    const evento = eventoRes.rows[0];
+    
+    const anno = evento.ficr_anno || new Date().getFullYear();
+    const equipe = evento.ficr_codice_equipe;
+    const manif = evento.ficr_manifestazione;
+    
+    if (!equipe || !manif) {
+      return res.status(400).json({ 
+        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione prima di importare.' 
+      });
+    }
+    
+    console.log(`[IMPORT-FICR] Evento ${id_evento}, Categoria ${categoria}, FICR: ${anno}/${equipe}/${manif}`);
+    
+    // 1. Chiama ENTRYLIST per ottenere i piloti
+    const entrylistUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
+    console.log('[IMPORT-FICR] Chiamata entrylist:', entrylistUrl);
+    
+    const entrylistRes = await fetch(entrylistUrl);
+    if (!entrylistRes.ok) {
+      return res.status(502).json({ error: `Errore API FICR entrylist: ${entrylistRes.status}` });
+    }
+    const entrylist = await entrylistRes.json();
+    
+    // 2. Chiama STARTLIST per ottenere gli orari (se disponibili)
+    const startlistUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoria}/1/1/*/*/*/*/*`;
+    console.log('[IMPORT-FICR] Chiamata startlist:', startlistUrl);
+    
+    let startlist = [];
+    try {
+      const startlistRes = await fetch(startlistUrl);
+      if (startlistRes.ok) {
+        startlist = await startlistRes.json();
+      }
+    } catch (e) {
+      console.log('[IMPORT-FICR] Startlist non disponibile:', e.message);
+    }
+    
+    // Crea mappa orari per numero gara
+    const orariMap = {};
+    if (Array.isArray(startlist)) {
+      for (const p of startlist) {
+        if (p.Numero && p.Orario) {
+          orariMap[p.Numero] = p.Orario;
+        }
+      }
+    }
+    
+    console.log(`[IMPORT-FICR] Entrylist: ${entrylist?.length || 0} piloti, Startlist: ${Object.keys(orariMap).length} orari`);
+    
+    if (!entrylist || !Array.isArray(entrylist) || entrylist.length === 0) {
+      return res.json({ 
+        success: true,
+        message: 'Nessun pilota trovato nella entrylist FICR per questa categoria',
+        created: 0,
+        updated: 0
+      });
+    }
+    
+    let created = 0;
+    let updated = 0;
+    
+    for (const pilota of entrylist) {
+      const numeroGara = pilota.Numero;
+      const cognome = pilota.Cognome || '';
+      const nome = pilota.Nome || '';
+      const classe = pilota.Classe || '';
+      const moto = pilota.Moto || '';
+      const team = pilota.Scuderia || pilota.MotoClub || '';
+      const orarioPartenza = orariMap[numeroGara] || null;
+      
+      if (!numeroGara) continue;
+      
+      // Verifica se pilota esiste già
+      const existingRes = await pool.query(
+        'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+        [id_evento, numeroGara]
+      );
+      
+      if (existingRes.rows.length > 0) {
+        // Aggiorna pilota esistente
+        await pool.query(`
+          UPDATE piloti SET 
+            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6
+          WHERE id_evento = $7 AND numero_gara = $8
+        `, [cognome, nome, classe, moto, team, orarioPartenza, id_evento, numeroGara]);
+        updated++;
+      } else {
+        // Crea nuovo pilota
+        await pool.query(`
+          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
+        created++;
+      }
+    }
+    
+    const orariMsg = Object.keys(orariMap).length > 0 ? ` (${Object.keys(orariMap).length} con orario)` : ' (orari non ancora disponibili)';
+    
+    res.json({
+      success: true,
+      message: `Import completato: ${created} creati, ${updated} aggiornati${orariMsg}`,
+      created,
+      updated,
+      total: entrylist.length,
+      orari_disponibili: Object.keys(orariMap).length
+    });
+    
+  } catch (err) {
+    console.error('[IMPORT-FICR] Errore:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== PROVE SPECIALI ====================
 
 // GET prove per evento
