@@ -222,6 +222,14 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Campi FICR (anno, codice_equipe, manifestazione) aggiunti a eventi');
+      
+      // NUOVO Chat 22: Campo codice_accesso_pubblico per accesso pubblico ERTA
+      return pool.query(`
+        ALTER TABLE eventi 
+        ADD COLUMN IF NOT EXISTS codice_accesso_pubblico VARCHAR(50);
+      `);
+    }).then(() => {
+      console.log('Campo codice_accesso_pubblico aggiunto a eventi');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -343,7 +351,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       codice_fmi,
       ficr_anno,
       ficr_codice_equipe,
-      ficr_manifestazione
+      ficr_manifestazione,
+      codice_accesso_pubblico  // NUOVO Chat 22: Accesso pubblico ERTA
     } = req.body;
     
     const result = await pool.query(
@@ -357,8 +366,9 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         codice_fmi = $9,
         ficr_anno = $10,
         ficr_codice_equipe = $11,
-        ficr_manifestazione = $12
-      WHERE id = $13 RETURNING *`,
+        ficr_manifestazione = $12,
+        codice_accesso_pubblico = $13
+      WHERE id = $14 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
@@ -370,6 +380,7 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         ficr_anno || null,
         ficr_codice_equipe || null,
         ficr_manifestazione || null,
+        codice_accesso_pubblico || null,
         id
       ]
     );
