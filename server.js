@@ -204,32 +204,6 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
-      
-      // NUOVO Chat 21: Colonna codice_fmi per transcodifica FMI→FICR
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS codice_fmi VARCHAR(20);
-      `);
-    }).then(() => {
-      console.log('Colonna codice_fmi aggiunta a eventi');
-      
-      // NUOVO Chat 21b: Campi configurazione FICR per import startlist
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS ficr_anno INTEGER,
-        ADD COLUMN IF NOT EXISTS ficr_codice_equipe VARCHAR(10),
-        ADD COLUMN IF NOT EXISTS ficr_manifestazione VARCHAR(10);
-      `);
-    }).then(() => {
-      console.log('Campi FICR (anno, codice_equipe, manifestazione) aggiunti a eventi');
-      
-      // NUOVO Chat 22: Campo codice_accesso_pubblico per accesso pubblico ERTA
-      return pool.query(`
-        ALTER TABLE eventi 
-        ADD COLUMN IF NOT EXISTS codice_accesso_pubblico VARCHAR(50);
-      `);
-    }).then(() => {
-      console.log('Campo codice_accesso_pubblico aggiunto a eventi');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -347,12 +321,7 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
       paddock_raggio, 
       gps_frequenza, 
       allarme_fermo_minuti,
-      codice_ddg,
-      codice_fmi,
-      ficr_anno,
-      ficr_codice_equipe,
-      ficr_manifestazione,
-      codice_accesso_pubblico  // NUOVO Chat 22: Accesso pubblico ERTA
+      codice_ddg
     } = req.body;
     
     const result = await pool.query(
@@ -362,13 +331,8 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         paddock_raggio = $5,
         gps_frequenza = $6,
         allarme_fermo_minuti = $7,
-        codice_ddg = $8,
-        codice_fmi = $9,
-        ficr_anno = $10,
-        ficr_codice_equipe = $11,
-        ficr_manifestazione = $12,
-        codice_accesso_pubblico = $13
-      WHERE id = $14 RETURNING *`,
+        codice_ddg = $8
+      WHERE id = $9 RETURNING *`,
       [
         paddock1_lat || null, paddock1_lon || null,
         paddock2_lat || null, paddock2_lon || null,
@@ -376,11 +340,6 @@ app.put('/api/eventi/:id/parametri-gps', async (req, res) => {
         gps_frequenza || 30,
         allarme_fermo_minuti || 10,
         codice_ddg || null,
-        codice_fmi || null,
-        ficr_anno || null,
-        ficr_codice_equipe || null,
-        ficr_manifestazione || null,
-        codice_accesso_pubblico || null,
         id
       ]
     );
@@ -660,434 +619,6 @@ app.delete('/api/piloti/:id', async (req, res) => {
   }
 });
 
-// NUOVO Chat 21: DELETE tutti piloti di un evento
-app.delete('/api/eventi/:id_evento/piloti', async (req, res) => {
-  try {
-    const { id_evento } = req.params;
-    const result = await pool.query('DELETE FROM piloti WHERE id_evento = $1', [id_evento]);
-    res.json({ 
-      message: `Eliminati ${result.rowCount} piloti`,
-      count: result.rowCount 
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// NUOVO Chat 21: Import piloti da FICR startlist (crea piloti + orari)
-app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
-  try {
-    const { id_evento } = req.params;
-    
-    // Recupera parametri FICR dall'evento
-    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    const evento = eventoRes.rows[0];
-    
-    const anno = evento.ficr_anno || new Date().getFullYear();
-    const equipe = evento.ficr_codice_equipe;
-    const manif = evento.ficr_manifestazione;
-    const codiceGara = evento.codice_gara; // es. "303-1", "303-2"
-    
-    if (!equipe || !manif) {
-      return res.status(400).json({ 
-        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione.' 
-      });
-    }
-    
-    // Estrai categoria FICR dal codice_gara (303-1 -> 1, 303-2 -> 2)
-    const categoriaFicr = codiceGara ? codiceGara.split('-')[1] : '1';
-    
-    // Chiama API FICR startlist
-    const ficrUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoriaFicr}/1/1/*/*/*/*/*`;
-    console.log('Import piloti FICR URL:', ficrUrl);
-    
-    const response = await fetch(ficrUrl);
-    if (!response.ok) {
-      return res.status(502).json({ error: `Errore API FICR: ${response.status}` });
-    }
-    
-    const jsonResponse = await response.json();
-    // FICR restituisce { code: 200, status: true, data: [...] }
-    const startlist = jsonResponse.data || jsonResponse;
-    
-    if (!startlist || !Array.isArray(startlist) || startlist.length === 0) {
-      return res.json({ 
-        message: 'Nessun pilota trovato nella startlist FICR',
-        created: 0,
-        updated: 0
-      });
-    }
-    
-    let created = 0;
-    let updated = 0;
-    
-    for (const pilota of startlist) {
-      const numeroGara = pilota.Numero;
-      const cognome = pilota.Cognome;
-      const nome = pilota.Nome;
-      const classe = pilota.Classe || '';
-      const moto = pilota.Moto || '';
-      const team = pilota.Scuderia || pilota.MotoClub || '';
-      const orarioPartenza = pilota.Orario || null;
-      
-      // Verifica se pilota esiste già
-      const existingRes = await pool.query(
-        'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-        [id_evento, numeroGara]
-      );
-      
-      if (existingRes.rows.length > 0) {
-        // Aggiorna pilota esistente
-        await pool.query(`
-          UPDATE piloti SET 
-            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6
-          WHERE id_evento = $7 AND numero_gara = $8
-        `, [cognome, nome, classe, moto, team, orarioPartenza, id_evento, numeroGara]);
-        updated++;
-      } else {
-        // Crea nuovo pilota
-        await pool.query(`
-          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
-        created++;
-      }
-    }
-    
-    res.json({
-      message: `Import completato: ${created} creati, ${updated} aggiornati`,
-      created,
-      updated,
-      total: startlist.length
-    });
-    
-  } catch (err) {
-    console.error('Errore import piloti FICR:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// NUOVO Chat 22: Import FICR per TUTTE le gare fratelle (3 modalità)
-app.post('/api/eventi/:id_evento/import-ficr-tutte', async (req, res) => {
-  try {
-    const { id_evento } = req.params;
-    const { modalita } = req.body; // 'program' | 'entrylist' | 'startlist'
-    
-    if (!['program', 'entrylist', 'startlist'].includes(modalita)) {
-      return res.status(400).json({ error: 'Modalità non valida. Usa: program, entrylist, startlist' });
-    }
-    
-    // Recupera evento e parametri FICR
-    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    const evento = eventoRes.rows[0];
-    
-    const anno = evento.ficr_anno || new Date().getFullYear();
-    const equipe = evento.ficr_codice_equipe;
-    const manif = evento.ficr_manifestazione;
-    
-    if (!equipe || !manif) {
-      return res.status(400).json({ 
-        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione.' 
-      });
-    }
-    
-    // Trova TUTTE le gare fratelle (303-1, 303-2, 303-3)
-    const prefisso = evento.codice_gara.split('-')[0];
-    const gareFratelleRes = await pool.query(
-      "SELECT * FROM eventi WHERE codice_gara LIKE $1 ORDER BY codice_gara",
-      [prefisso + '-%']
-    );
-    const gareFratelle = gareFratelleRes.rows;
-    
-    console.log(`[IMPORT-FICR-TUTTE] Modalità: ${modalita}, Gare fratelle: ${gareFratelle.map(g => g.codice_gara).join(', ')}`);
-    
-    const risultati = {};
-    
-    for (const gara of gareFratelle) {
-      // Estrai categoria dal codice gara (303-1 -> 1, 303-2 -> 2, etc.)
-      const categoria = parseInt(gara.codice_gara.split('-')[1]) || 1;
-      
-      let apiUrl;
-      let pilotiData = [];
-      
-      try {
-        if (modalita === 'program') {
-          // T-5: Usa entrylist per caricare piloti base (program contiene solo prove speciali)
-          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
-        } else if (modalita === 'entrylist') {
-          // T-2: Numeri di gara
-          apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
-        } else {
-          // T-1: Ordine di partenza
-          apiUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoria}/1/1/*/*/*/*/*`;
-        }
-        
-        console.log(`[IMPORT-FICR-TUTTE] ${gara.codice_gara} -> ${apiUrl}`);
-        
-        const apiRes = await fetch(apiUrl);
-        if (apiRes.ok) {
-          const jsonResponse = await apiRes.json();
-          // FICR restituisce { code: 200, status: true, data: [...] }
-          pilotiData = jsonResponse.data || jsonResponse;
-          if (!Array.isArray(pilotiData)) pilotiData = [];
-        }
-      } catch (e) {
-        console.log(`[IMPORT-FICR-TUTTE] Errore API per ${gara.codice_gara}:`, e.message);
-      }
-      
-      if (!Array.isArray(pilotiData) || pilotiData.length === 0) {
-        risultati[gara.codice_gara] = { created: 0, updated: 0, message: 'Nessun dato disponibile' };
-        continue;
-      }
-      
-      let created = 0;
-      let updated = 0;
-      
-      for (const pilota of pilotiData) {
-        const numeroGara = pilota.Numero;
-        const cognome = pilota.Cognome || '';
-        const nome = pilota.Nome || '';
-        const classe = pilota.Classe || '';
-        const moto = pilota.Moto || '';
-        const team = pilota.Motoclub || pilota.Scuderia || pilota.MotoClub || '';
-        const orarioPartenza = pilota.Orario || null;
-        
-        if (!numeroGara) continue;
-        
-        // Verifica se pilota esiste già
-        const existingRes = await pool.query(
-          'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-          [gara.id, numeroGara]
-        );
-        
-        if (existingRes.rows.length > 0) {
-          // Aggiorna pilota esistente
-          if (modalita === 'startlist') {
-            // Solo orario per startlist
-            await pool.query(
-              'UPDATE piloti SET orario_partenza = $1 WHERE id_evento = $2 AND numero_gara = $3',
-              [orarioPartenza, gara.id, numeroGara]
-            );
-          } else {
-            await pool.query(`
-              UPDATE piloti SET 
-                cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = COALESCE($6, orario_partenza)
-              WHERE id_evento = $7 AND numero_gara = $8
-            `, [cognome, nome, classe, moto, team, orarioPartenza, gara.id, numeroGara]);
-          }
-          updated++;
-        } else {
-          // Crea nuovo pilota
-          await pool.query(`
-            INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          `, [gara.id, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
-          created++;
-        }
-      }
-      
-      risultati[gara.codice_gara] = { created, updated, total: pilotiData.length };
-    }
-    
-    // Calcola totali
-    let totCreated = 0, totUpdated = 0;
-    Object.values(risultati).forEach(r => {
-      totCreated += r.created || 0;
-      totUpdated += r.updated || 0;
-    });
-    
-    res.json({
-      success: true,
-      modalita,
-      risultati,
-      totali: { created: totCreated, updated: totUpdated },
-      message: `Import ${modalita}: ${totCreated} creati, ${totUpdated} aggiornati`
-    });
-    
-  } catch (err) {
-    console.error('[IMPORT-FICR-TUTTE] Errore:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// NUOVO Chat 22: Cancella piloti da TUTTE le gare fratelle
-app.delete('/api/eventi/:id_evento/piloti-tutte', async (req, res) => {
-  try {
-    const { id_evento } = req.params;
-    
-    // Recupera evento
-    const eventoRes = await pool.query('SELECT codice_gara FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    
-    // Trova TUTTE le gare fratelle
-    const prefisso = eventoRes.rows[0].codice_gara.split('-')[0];
-    const gareFratelleRes = await pool.query(
-      "SELECT id, codice_gara FROM eventi WHERE codice_gara LIKE $1",
-      [prefisso + '-%']
-    );
-    
-    const risultati = {};
-    let totale = 0;
-    
-    for (const gara of gareFratelleRes.rows) {
-      const deleteRes = await pool.query('DELETE FROM piloti WHERE id_evento = $1', [gara.id]);
-      risultati[gara.codice_gara] = deleteRes.rowCount;
-      totale += deleteRes.rowCount;
-    }
-    
-    res.json({
-      success: true,
-      message: `Eliminati ${totale} piloti da tutte le gare`,
-      risultati,
-      totale
-    });
-    
-  } catch (err) {
-    console.error('[DELETE-PILOTI-TUTTE] Errore:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// NUOVO Chat 22: Import completo da FICR (entrylist + startlist) per una categoria specifica
-app.post('/api/eventi/:id_evento/import-completo-ficr', async (req, res) => {
-  try {
-    const { id_evento } = req.params;
-    const { categoria } = req.body; // 1=Campionato, 2=Training, 3=Epoca
-    
-    if (!categoria) {
-      return res.status(400).json({ error: 'Categoria richiesta (1, 2 o 3)' });
-    }
-    
-    // Recupera parametri FICR dall'evento
-    const eventoRes = await pool.query('SELECT * FROM eventi WHERE id = $1', [id_evento]);
-    if (eventoRes.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    const evento = eventoRes.rows[0];
-    
-    const anno = evento.ficr_anno || new Date().getFullYear();
-    const equipe = evento.ficr_codice_equipe;
-    const manif = evento.ficr_manifestazione;
-    
-    if (!equipe || !manif) {
-      return res.status(400).json({ 
-        error: 'Parametri FICR non configurati. Configura Anno, Codice Equipe e Manifestazione prima di importare.' 
-      });
-    }
-    
-    console.log(`[IMPORT-FICR] Evento ${id_evento}, Categoria ${categoria}, FICR: ${anno}/${equipe}/${manif}`);
-    
-    // 1. Chiama ENTRYLIST per ottenere i piloti
-    const entrylistUrl = `https://apienduro.ficr.it/END/mpcache-30/get/entrylist/${anno}/${equipe}/${manif}/${categoria}/*/*/*/*/*/*/*`;
-    console.log('[IMPORT-FICR] Chiamata entrylist:', entrylistUrl);
-    
-    const entrylistRes = await fetch(entrylistUrl);
-    if (!entrylistRes.ok) {
-      return res.status(502).json({ error: `Errore API FICR entrylist: ${entrylistRes.status}` });
-    }
-    const entrylistJson = await entrylistRes.json();
-    // FICR restituisce { code: 200, status: true, data: [...] }
-    const entrylist = entrylistJson.data || entrylistJson;
-    
-    // 2. Chiama STARTLIST per ottenere gli orari (se disponibili)
-    const startlistUrl = `https://apienduro.ficr.it/END/mpcache-20/get/startlist/${anno}/${equipe}/${manif}/${categoria}/1/1/*/*/*/*/*`;
-    console.log('[IMPORT-FICR] Chiamata startlist:', startlistUrl);
-    
-    let startlist = [];
-    try {
-      const startlistRes = await fetch(startlistUrl);
-      if (startlistRes.ok) {
-        const startlistJson = await startlistRes.json();
-        startlist = startlistJson.data || startlistJson;
-      }
-    } catch (e) {
-      console.log('[IMPORT-FICR] Startlist non disponibile:', e.message);
-    }
-    
-    // Crea mappa orari per numero gara
-    const orariMap = {};
-    if (Array.isArray(startlist)) {
-      for (const p of startlist) {
-        if (p.Numero && p.Orario) {
-          orariMap[p.Numero] = p.Orario;
-        }
-      }
-    }
-    
-    console.log(`[IMPORT-FICR] Entrylist: ${entrylist?.length || 0} piloti, Startlist: ${Object.keys(orariMap).length} orari`);
-    
-    if (!entrylist || !Array.isArray(entrylist) || entrylist.length === 0) {
-      return res.json({ 
-        success: true,
-        message: 'Nessun pilota trovato nella entrylist FICR per questa categoria',
-        created: 0,
-        updated: 0
-      });
-    }
-    
-    let created = 0;
-    let updated = 0;
-    
-    for (const pilota of entrylist) {
-      const numeroGara = pilota.Numero;
-      const cognome = pilota.Cognome || '';
-      const nome = pilota.Nome || '';
-      const classe = pilota.Classe || '';
-      const moto = pilota.Moto || '';
-      const team = pilota.Scuderia || pilota.MotoClub || '';
-      const orarioPartenza = orariMap[numeroGara] || null;
-      
-      if (!numeroGara) continue;
-      
-      // Verifica se pilota esiste già
-      const existingRes = await pool.query(
-        'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-        [id_evento, numeroGara]
-      );
-      
-      if (existingRes.rows.length > 0) {
-        // Aggiorna pilota esistente
-        await pool.query(`
-          UPDATE piloti SET 
-            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6
-          WHERE id_evento = $7 AND numero_gara = $8
-        `, [cognome, nome, classe, moto, team, orarioPartenza, id_evento, numeroGara]);
-        updated++;
-      } else {
-        // Crea nuovo pilota
-        await pool.query(`
-          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
-        created++;
-      }
-    }
-    
-    const orariMsg = Object.keys(orariMap).length > 0 ? ` (${Object.keys(orariMap).length} con orario)` : ' (orari non ancora disponibili)';
-    
-    res.json({
-      success: true,
-      message: `Import completato: ${created} creati, ${updated} aggiornati${orariMsg}`,
-      created,
-      updated,
-      total: entrylist.length,
-      orari_disponibili: Object.keys(orariMap).length
-    });
-    
-  } catch (err) {
-    console.error('[IMPORT-FICR] Errore:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ==================== PROVE SPECIALI ====================
 
 // GET prove per evento
@@ -1355,136 +886,6 @@ app.post('/api/ficr/import-tempi', async (req, res) => {
     
     res.json({ success: true, tempiImportati });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST import TUTTI i tempi archiviati da FICR per un evento (Chat 22)
-app.post('/api/eventi/:id/import-tempi-archiviati', async (req, res) => {
-  const { id } = req.params;
-  
-  try {
-    console.log(`[IMPORT-TEMPI] Inizio import per evento ${id}`);
-    
-    // 1. Carica evento con parametri FICR
-    const eventoResult = await pool.query('SELECT * FROM eventi WHERE id = $1', [id]);
-    if (eventoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Evento non trovato' });
-    }
-    
-    const evento = eventoResult.rows[0];
-    const { ficr_anno, ficr_codice_equipe, ficr_manifestazione } = evento;
-    
-    if (!ficr_anno || !ficr_codice_equipe || !ficr_manifestazione) {
-      return res.status(400).json({ error: 'Parametri FICR mancanti (anno, equipe, manifestazione)' });
-    }
-    
-    // Determina categoria/giorno dalla gara (1=Campionato, 2=Training, 3=Epoca)
-    let categoriaFicr = 1;
-    if (evento.codice_gara) {
-      const match = evento.codice_gara.match(/-(\d+)$/);
-      if (match) categoriaFicr = parseInt(match[1]);
-    }
-    
-    console.log(`[IMPORT-TEMPI] Evento: ${evento.nome_evento}`);
-    console.log(`[IMPORT-TEMPI] FICR: anno=${ficr_anno} equipe=${ficr_codice_equipe} manif=${ficr_manifestazione} cat=${categoriaFicr}`);
-    
-    // 2. Carica prove speciali dell'evento
-    const proveResult = await pool.query(
-      'SELECT id, nome_ps, numero_ordine FROM prove_speciali WHERE id_evento = $1 ORDER BY numero_ordine',
-      [id]
-    );
-    
-    if (proveResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Nessuna prova speciale trovata' });
-    }
-    
-    console.log(`[IMPORT-TEMPI] Trovate ${proveResult.rows.length} prove speciali`);
-    
-    // 3. Carica piloti per mapping numero_gara -> id
-    const pilotiResult = await pool.query(
-      'SELECT id, numero_gara FROM piloti WHERE id_evento = $1',
-      [id]
-    );
-    
-    const pilotiMap = {};
-    pilotiResult.rows.forEach(p => {
-      pilotiMap[p.numero_gara] = p.id;
-    });
-    
-    console.log(`[IMPORT-TEMPI] Trovati ${pilotiResult.rows.length} piloti`);
-    
-    // 4. Per ogni prova, chiama FICR e importa tempi
-    let totaleTempi = 0;
-    const risultatiProve = [];
-    
-    for (const prova of proveResult.rows) {
-      const numeroOrdine = prova.numero_ordine;
-      
-      // Chiama API FICR per questa prova
-      const url = `${FICR_BASE_URL}/END/mpcache-5/get/clasps/${ficr_anno}/${ficr_codice_equipe}/${ficr_manifestazione}/${categoriaFicr}/${numeroOrdine}/1/*/*/*/*/*`;
-      
-      console.log(`[IMPORT-TEMPI] Chiamo FICR per ${prova.nome_ps}: ${url}`);
-      
-      try {
-        const response = await axios.get(url);
-        
-        if (!response.data?.data?.clasdella || response.data.data.clasdella.length === 0) {
-          console.log(`[IMPORT-TEMPI] ${prova.nome_ps}: nessun tempo trovato`);
-          risultatiProve.push({ prova: prova.nome_ps, tempi: 0, status: 'empty' });
-          continue;
-        }
-        
-        const tempiFicr = response.data.data.clasdella;
-        let tempiProva = 0;
-        
-        for (const tempoFICR of tempiFicr) {
-          const idPilota = pilotiMap[tempoFICR.Numero];
-          if (!idPilota) continue;
-          
-          const tempoStr = tempoFICR.Tempo;
-          if (!tempoStr) continue;
-          
-          // Parse tempo formato "4'41.21" o "0'00.00"
-          const match = tempoStr.match(/(\d+)'(\d+\.\d+)/);
-          if (!match) continue;
-          
-          const tempoSecondi = parseInt(match[1]) * 60 + parseFloat(match[2]);
-          if (tempoSecondi === 0) continue; // Salta tempi nulli
-          
-          // Salva nel DB
-          await pool.query(
-            `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-             VALUES ($1, $2, $3, 0)
-             ON CONFLICT (id_pilota, id_ps) 
-             DO UPDATE SET tempo_secondi = $3`,
-            [idPilota, prova.id, tempoSecondi]
-          );
-          
-          tempiProva++;
-        }
-        
-        console.log(`[IMPORT-TEMPI] ${prova.nome_ps}: ${tempiProva} tempi importati`);
-        risultatiProve.push({ prova: prova.nome_ps, tempi: tempiProva, status: 'ok' });
-        totaleTempi += tempiProva;
-        
-      } catch (err) {
-        console.error(`[IMPORT-TEMPI] Errore ${prova.nome_ps}:`, err.message);
-        risultatiProve.push({ prova: prova.nome_ps, tempi: 0, status: 'error', error: err.message });
-      }
-    }
-    
-    console.log(`[IMPORT-TEMPI] Completato: ${totaleTempi} tempi totali importati`);
-    
-    res.json({
-      success: true,
-      evento: evento.nome_evento,
-      tempiTotali: totaleTempi,
-      prove: risultatiProve
-    });
-    
-  } catch (err) {
-    console.error('[IMPORT-TEMPI] Errore generale:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2257,13 +1658,7 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       return res.status(400).json({ error: 'Parametri mancanti: id_evento e xml_content richiesti' });
     }
     
-    // NUOVO Chat 21b: Recupera codice_gara per filtrare per categoria
-    const eventoRes = await pool.query('SELECT codice_gara FROM eventi WHERE id = $1', [id_evento]);
-    const codiceGara = eventoRes.rows[0]?.codice_gara || '';
-    const isTraining = codiceGara.includes('-2');  // 303-2 = Training
-    const isEpoca = codiceGara.includes('-3');     // 303-3 = Epoca
-    
-    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}, codice_gara=${codiceGara}, isTraining=${isTraining}, isEpoca=${isEpoca}`);
+    console.log(`[IMPORT-XML] Inizio import per evento ${id_evento}`);
     
     // Decodifica base64 se necessario
     let xmlText = xml_content;
@@ -2286,11 +1681,10 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       return res.status(400).json({ error: 'Nessun conduttore trovato nel file XML' });
     }
     
-    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori nel file`);
+    console.log(`[IMPORT-XML] Trovati ${conduttoriMatch.length} conduttori`);
     
     let pilotiImportati = 0;
     let pilotiAggiornati = 0;
-    let pilotiSaltati = 0;
     let errori = [];
     
     for (const conduttoreXml of conduttoriMatch) {
@@ -2317,28 +1711,7 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
           continue;
         }
         
-        // NUOVO Chat 21b: Filtra per categoria gara
-        const isClasseTU = classe === 'TU';
-        
-        if (isTraining && !isClasseTU) {
-          // Training: importa SOLO classe TU
-          pilotiSaltati++;
-          continue;
-        }
-        
-        if (!isTraining && !isEpoca && isClasseTU) {
-          // Campionato: importa TUTTI tranne classe TU
-          pilotiSaltati++;
-          continue;
-        }
-        
-        if (isEpoca) {
-          // Epoca: questo XML non contiene piloti Epoca, saltare tutto
-          pilotiSaltati++;
-          continue;
-        }
-        
-        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome} (classe: ${classe})`);
+        console.log(`[IMPORT-XML] Processo #${ngara} ${cognome} ${nome}`);
         
         // Verifica se pilota esiste già
         const existingResult = await pool.query(
@@ -2372,15 +1745,13 @@ app.post('/api/import-xml-iscritti', async (req, res) => {
       }
     }
     
-    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati, ${pilotiSaltati} saltati (filtro categoria)`);
+    console.log(`[IMPORT-XML] Completato: ${pilotiImportati} nuovi, ${pilotiAggiornati} aggiornati`);
     
     res.json({
       success: true,
       piloti_importati: pilotiImportati,
       piloti_aggiornati: pilotiAggiornati,
-      piloti_saltati: pilotiSaltati,
       totale_processati: conduttoriMatch.length,
-      filtro: isTraining ? 'Solo classe TU (Training)' : isEpoca ? 'Epoca (non supportato)' : 'Esclusa classe TU',
       errori: errori.length > 0 ? errori : undefined
     });
     
@@ -2679,21 +2050,6 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
       .sort((a, b) => a.sortKey - b.sortKey)
       .map(({ sortKey, ...t }) => t);
     
-    // NUOVO Chat 22: Cancella tempi dal DB (li abbiamo in memoria)
-    const proveResult = await pool.query(
-      'SELECT id FROM prove_speciali WHERE id_evento = $1',
-      [id]
-    );
-    const proveIds = proveResult.rows.map(p => p.id);
-    
-    if (proveIds.length > 0) {
-      await pool.query(
-        'DELETE FROM tempi WHERE id_ps = ANY($1)',
-        [proveIds]
-      );
-      console.log(`[SIMULATE-RESET] Cancellati ${tempiResult.rows.length} tempi dal DB`);
-    }
-    
     // Salva stato simulazione
     simulationState[id] = {
       tempiTotali: tempiShuffled,
@@ -2705,7 +2061,7 @@ app.post('/api/eventi/:id/simulate-reset', async (req, res) => {
     
     res.json({
       success: true,
-      message: 'Simulazione resettata - tempi cancellati dal DB',
+      message: 'Simulazione resettata',
       tempiTotali: tempiShuffled.length,
       tempiRilasciati: 0,
       tempiRimanenti: tempiShuffled.length
@@ -2723,12 +2079,44 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
   const batchSize = parseInt(req.query.batch) || 15; // Default 15 tempi per batch
   
   try {
-    // Se non c'è simulazione attiva, errore (deve fare reset prima)
+    // Se non c'è simulazione attiva, la inizializza
     if (!simulationState[id]) {
-      return res.status(400).json({
-        success: false,
-        error: 'Nessuna simulazione attiva. Esegui prima Inizializza/Reset.'
-      });
+      // Auto-reset
+      const tempiResult = await pool.query(
+        `SELECT t.id, t.id_pilota, t.id_ps, t.tempo_secondi, t.penalita_secondi,
+                p.numero_gara, p.nome, p.cognome, p.classe,
+                ps.numero_ordine, ps.nome_ps
+         FROM tempi t
+         JOIN piloti p ON t.id_pilota = p.id
+         JOIN prove_speciali ps ON t.id_ps = ps.id
+         WHERE ps.id_evento = $1
+         ORDER BY ps.numero_ordine, t.tempo_secondi`,
+        [id]
+      );
+      
+      if (tempiResult.rows.length === 0) {
+        return res.json({
+          success: true,
+          nuoviTempi: [],
+          tempiTotali: 0,
+          tempiRilasciati: 0,
+          tempiRimanenti: 0,
+          simulazioneCompleta: true
+        });
+      }
+      
+      const tempiShuffled = tempiResult.rows
+        .map(t => ({ ...t, sortKey: Math.random() }))
+        .sort((a, b) => a.sortKey - b.sortKey)
+        .map(({ sortKey, ...t }) => t);
+      
+      simulationState[id] = {
+        tempiTotali: tempiShuffled,
+        tempiRilasciati: [],
+        indiceCorrente: 0,
+        inizioSimulazione: new Date(),
+        ultimoPolling: null
+      };
     }
     
     const state = simulationState[id];
@@ -2742,25 +2130,12 @@ app.get('/api/eventi/:id/simulate-poll', async (req, res) => {
     const endIdx = Math.min(startIdx + actualBatch, state.tempiTotali.length);
     const nuoviTempi = state.tempiTotali.slice(startIdx, endIdx);
     
-    // NUOVO Chat 22: Reinserisci tempi nel DB
-    for (const tempo of nuoviTempi) {
-      await pool.query(
-        `INSERT INTO tempi (id_pilota, id_ps, tempo_secondi, penalita_secondi)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id_pilota, id_ps) 
-         DO UPDATE SET tempo_secondi = $3, penalita_secondi = $4`,
-        [tempo.id_pilota, tempo.id_ps, tempo.tempo_secondi, tempo.penalita_secondi || 0]
-      );
-    }
-    
     // Aggiorna stato
     state.indiceCorrente = endIdx;
     state.tempiRilasciati = state.tempiRilasciati.concat(nuoviTempi);
     state.ultimoPolling = new Date();
     
     const simulazioneCompleta = state.indiceCorrente >= state.tempiTotali.length;
-    
-    console.log(`[SIMULATE-POLL] Rilasciati ${nuoviTempi.length} tempi (${state.indiceCorrente}/${state.tempiTotali.length})`);
     
     res.json({
       success: true,
@@ -2962,17 +2337,15 @@ app.get('/api/app/miei-tempi/:codice_accesso/:numero_pilota', async (req, res) =
     );
     
     // Calcola classifica assoluta
-    // FIX Chat 22: Prima ordina per numero PS fatte (DESC), poi per tempo (ASC)
     const classificaResult = await pool.query(
       `SELECT p.id, p.numero_gara, p.cognome, p.nome, p.classe,
-              COUNT(t.id) as ps_fatte,
               SUM(t.tempo_secondi) as tempo_totale
        FROM piloti p
        JOIN tempi t ON t.id_pilota = p.id
        WHERE p.id_evento = $1
        GROUP BY p.id
        HAVING SUM(t.tempo_secondi) > 0
-       ORDER BY ps_fatte DESC, tempo_totale ASC`,
+       ORDER BY tempo_totale ASC`,
       [evento.id]
     );
     
@@ -3124,393 +2497,6 @@ app.get('/api/app/comunicati/:codice_accesso/pdf/:id', async (req, res) => {
     res.status(500).json({ success: false, error: 'Errore server' });
   }
 });
-
-// ============================================
-// API ERTA OPEN - Accesso senza login (Chat 21)
-// ============================================
-
-// GET info evento + piloti + comunicati (NO LOGIN) - Aggrega per codice_fmi
-app.get('/api/app/evento/:codice/open', async (req, res) => {
-  try {
-    const { codice } = req.params;
-    const codiceUpper = codice.toUpperCase();
-    
-    // Prima cerca per codice_fmi (può restituire multiple gare)
-    let eventiResult = await pool.query(
-      `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-       FROM eventi 
-       WHERE UPPER(codice_fmi) = $1`,
-      [codiceUpper]
-    );
-    
-    // Se non trova per codice_fmi, cerca per codice_accesso o codice_gara (retrocompatibilità)
-    if (eventiResult.rows.length === 0) {
-      eventiResult = await pool.query(
-        `SELECT id, nome_evento, data_inizio, luogo, codice_gara, codice_accesso, codice_fmi 
-         FROM eventi 
-         WHERE UPPER(codice_accesso) = $1 OR UPPER(codice_gara) = $1`,
-        [codiceUpper]
-      );
-    }
-    
-    if (eventiResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Evento non trovato' });
-    }
-    
-    const eventi = eventiResult.rows;
-    const eventoIds = eventi.map(e => e.id);
-    const codiciGara = eventi.map(e => e.codice_gara);
-    
-    // Lista piloti aggregata da tutte le gare
-    const pilotiResult = await pool.query(
-      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, p.orario_partenza, e.codice_gara
-       FROM piloti p
-       JOIN eventi e ON p.id_evento = e.id
-       WHERE p.id_evento = ANY($1)
-       ORDER BY p.numero_gara`,
-      [eventoIds]
-    );
-    
-    // Comunicati aggregati da tutte le gare
-    const comunicatiResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
-              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
-              pdf_nome
-       FROM comunicati 
-       WHERE codice_gara = ANY($1)
-       ORDER BY created_at DESC`,
-      [codiciGara]
-    );
-    
-    // Raggruppa comunicati per tipo
-    const comunicati = {
-      comunicato: comunicatiResult.rows.filter(c => c.tipo === 'comunicato'),
-      general_info: comunicatiResult.rows.filter(c => c.tipo === 'general_info'),
-      paddock_info: comunicatiResult.rows.filter(c => c.tipo === 'paddock_info')
-    };
-    
-    // Info manifestazione (prendi dal primo evento)
-    const primoEvento = eventi[0];
-    
-    console.log(`[ERTA OPEN] Codice: ${codice}, Gare: ${eventi.length}, Piloti: ${pilotiResult.rows.length}`);
-    
-    res.json({
-      success: true,
-      codice_fmi: primoEvento.codice_fmi || codice,
-      manifestazione: {
-        luogo: primoEvento.luogo,
-        data: primoEvento.data_inizio
-      },
-      gare: eventi.map(e => ({
-        codice_gara: e.codice_gara,
-        nome: e.nome_evento
-      })),
-      piloti: pilotiResult.rows,
-      comunicati: comunicati,
-      totale_piloti: pilotiResult.rows.length,
-      totale_gare: eventi.length
-    });
-    
-  } catch (err) {
-    console.error('[GET /api/app/evento/:codice/open] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// ============================================
-// NUOVO Chat 22: API ERTA PUBBLICO (senza autenticazione pilota)
-// ============================================
-
-// Funzione helper per trovare gare da codice FMI pubblico
-async function trovaGareDaCodicePubblico(codice) {
-  const codiceUpper = codice.toUpperCase().trim();
-  
-  // Cerca in codice_fmi
-  let result = await pool.query(
-    `SELECT * FROM eventi WHERE UPPER(codice_fmi) = $1`,
-    [codiceUpper]
-  );
-  
-  // Se non trova, cerca in codice_accesso_pubblico (può contenere multipli separati da virgola)
-  if (result.rows.length === 0) {
-    result = await pool.query(
-      `SELECT * FROM eventi WHERE UPPER(codice_accesso_pubblico) LIKE $1`,
-      [`%${codiceUpper}%`]
-    );
-  }
-  
-  // Fallback: cerca per codice_gara o codice_accesso
-  if (result.rows.length === 0) {
-    result = await pool.query(
-      `SELECT * FROM eventi WHERE UPPER(codice_gara) = $1 OR UPPER(codice_accesso) = $1`,
-      [codiceUpper]
-    );
-  }
-  
-  return result.rows;
-}
-
-// 1. LOGIN PUBBLICO - Solo codice FMI
-app.post('/api/app/login-pubblico', async (req, res) => {
-  try {
-    const { codice_fmi } = req.body;
-    
-    if (!codice_fmi) {
-      return res.status(400).json({ success: false, error: 'Codice FMI richiesto' });
-    }
-    
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    res.json({
-      success: true,
-      isPublic: true,
-      codice_fmi: codice_fmi.toUpperCase(),
-      gare: gare.map(g => ({
-        id: g.id,
-        codice_gara: g.codice_gara,
-        nome: g.nome_evento,
-        data: g.data_inizio,
-        luogo: g.luogo
-      }))
-    });
-  } catch (err) {
-    console.error('[POST /api/app/login-pubblico] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// 2. ISCRITTI PUBBLICO - Lista piloti ordinata per cognome
-app.get('/api/app/pubblico/iscritti/:codice_fmi', async (req, res) => {
-  try {
-    const { codice_fmi } = req.params;
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    const eventoIds = gare.map(g => g.id);
-    
-    const pilotiResult = await pool.query(
-      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.moto, p.team, e.codice_gara
-       FROM piloti p
-       JOIN eventi e ON p.id_evento = e.id
-       WHERE p.id_evento = ANY($1)
-       ORDER BY p.cognome, p.nome`,
-      [eventoIds]
-    );
-    
-    res.json({
-      success: true,
-      totale: pilotiResult.rows.length,
-      piloti: pilotiResult.rows.map(p => ({
-        numero: p.numero_gara,
-        cognome: p.cognome,
-        nome: p.nome,
-        classe: p.classe,
-        moto: p.moto,
-        team: p.team,
-        gara: p.codice_gara
-      }))
-    });
-  } catch (err) {
-    console.error('[GET /api/app/pubblico/iscritti] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// 3. ORDINE PARTENZA PUBBLICO - Lista piloti ordinata per orario
-app.get('/api/app/pubblico/ordine/:codice_fmi', async (req, res) => {
-  try {
-    const { codice_fmi } = req.params;
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    const eventoIds = gare.map(g => g.id);
-    
-    const pilotiResult = await pool.query(
-      `SELECT p.numero_gara, p.cognome, p.nome, p.classe, p.orario_partenza, e.codice_gara
-       FROM piloti p
-       JOIN eventi e ON p.id_evento = e.id
-       WHERE p.id_evento = ANY($1) AND p.orario_partenza IS NOT NULL
-       ORDER BY p.orario_partenza, p.numero_gara`,
-      [eventoIds]
-    );
-    
-    res.json({
-      success: true,
-      totale: pilotiResult.rows.length,
-      partenze: pilotiResult.rows.map(p => ({
-        numero: p.numero_gara,
-        cognome: p.cognome,
-        nome: p.nome,
-        classe: p.classe,
-        orario: p.orario_partenza ? p.orario_partenza.substring(0, 5) : null,
-        gara: p.codice_gara
-      }))
-    });
-  } catch (err) {
-    console.error('[GET /api/app/pubblico/ordine] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// 4. PROGRAMMA PUBBLICO - Prove speciali da FICR
-app.get('/api/app/pubblico/programma/:codice_fmi', async (req, res) => {
-  try {
-    const { codice_fmi } = req.params;
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    // Prende parametri FICR dalla prima gara
-    const gara = gare[0];
-    const anno = gara.ficr_anno || new Date().getFullYear();
-    const equipe = gara.ficr_codice_equipe;
-    const manif = gara.ficr_manifestazione;
-    
-    if (!equipe || !manif) {
-      return res.json({
-        success: true,
-        prove: [],
-        message: 'Parametri FICR non configurati'
-      });
-    }
-    
-    // Estrai categoria dal codice gara (303-1 -> 1)
-    const categoria = parseInt(gara.codice_gara.split('-')[1]) || 1;
-    
-    // Chiama API FICR program
-    const apiUrl = `https://apienduro.ficr.it/END/mpcache-30/get/program/${anno}/${equipe}/${manif}/${categoria}`;
-    console.log('[PROGRAMMA PUBBLICO] Chiamata FICR:', apiUrl);
-    
-    try {
-      const ficrRes = await fetch(apiUrl);
-      if (ficrRes.ok) {
-        const ficrData = await ficrRes.json();
-        const prove = ficrData.data || ficrData || [];
-        
-        res.json({
-          success: true,
-          gara: gara.nome_evento,
-          prove: Array.isArray(prove) ? prove.map(p => ({
-            sigla: p.Sigla,
-            descrizione: p.Description,
-            lunghezza: p.Length,
-            data: p.Data
-          })) : []
-        });
-      } else {
-        res.json({ success: true, prove: [], message: 'Programma non disponibile da FICR' });
-      }
-    } catch (ficrErr) {
-      console.error('[PROGRAMMA PUBBLICO] Errore FICR:', ficrErr.message);
-      res.json({ success: true, prove: [], message: 'Programma non disponibile' });
-    }
-  } catch (err) {
-    console.error('[GET /api/app/pubblico/programma] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// 5. COMUNICATI PUBBLICO - Comunicati di gara
-app.get('/api/app/pubblico/comunicati/:codice_fmi', async (req, res) => {
-  try {
-    const { codice_fmi } = req.params;
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    const codiciGara = gare.map(g => g.codice_gara);
-    
-    const comunicatiResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, tipo, codice_gara,
-              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
-              pdf_nome, created_at
-       FROM comunicati
-       WHERE codice_gara = ANY($1) AND (tipo = 'comunicato' OR tipo IS NULL)
-       ORDER BY created_at DESC`,
-      [codiciGara]
-    );
-    
-    res.json({
-      success: true,
-      totale: comunicatiResult.rows.length,
-      comunicati: comunicatiResult.rows.map(c => ({
-        id: c.id,
-        numero: c.numero,
-        ora: c.ora,
-        data: c.data,
-        testo: c.testo,
-        gara: c.codice_gara,
-        ha_pdf: c.ha_pdf,
-        pdf_nome: c.pdf_nome,
-        created_at: c.created_at
-      }))
-    });
-  } catch (err) {
-    console.error('[GET /api/app/pubblico/comunicati] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// 6. SERVIZIO PUBBLICO - Comunicazioni di servizio (tipo = 'servizio')
-app.get('/api/app/pubblico/servizio/:codice_fmi', async (req, res) => {
-  try {
-    const { codice_fmi } = req.params;
-    const gare = await trovaGareDaCodicePubblico(codice_fmi);
-    
-    if (gare.length === 0) {
-      return res.status(404).json({ success: false, error: 'Codice non valido' });
-    }
-    
-    const codiciGara = gare.map(g => g.codice_gara);
-    
-    const servizioResult = await pool.query(
-      `SELECT id, numero, ora, data, testo, codice_gara,
-              CASE WHEN pdf_allegato IS NOT NULL THEN true ELSE false END as ha_pdf,
-              pdf_nome, created_at
-       FROM comunicati
-       WHERE codice_gara = ANY($1) AND tipo = 'servizio'
-       ORDER BY created_at DESC`,
-      [codiciGara]
-    );
-    
-    res.json({
-      success: true,
-      totale: servizioResult.rows.length,
-      comunicazioni: servizioResult.rows.map(c => ({
-        id: c.id,
-        numero: c.numero,
-        ora: c.ora,
-        data: c.data,
-        testo: c.testo,
-        gara: c.codice_gara,
-        ha_pdf: c.ha_pdf,
-        pdf_nome: c.pdf_nome,
-        created_at: c.created_at
-      }))
-    });
-  } catch (err) {
-    console.error('[GET /api/app/pubblico/servizio] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Errore server' });
-  }
-});
-
-// ============================================
-// FINE API APP ERTA PUBBLICO
-// ============================================
 
 // ============================================
 // FINE API APP ERTA
@@ -4405,12 +3391,7 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     
     // 1. Trova evento e tempi settore
     const eventoResult = await pool.query(
-      `SELECT e.id as evento_id, e.nome_evento, e.codice_gara, e.data_inizio,
-              ts.co1_attivo, ts.co2_attivo, ts.co3_attivo,
-              ts.tempo_par_co1, ts.tempo_co1_co2, ts.tempo_co2_co3, ts.tempo_ultimo_arr
-       FROM eventi e 
-       LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 
-       WHERE e.codice_gara = $1`,
+      'SELECT e.*, ts.* FROM eventi e LEFT JOIN tempi_settore ts ON e.id = ts.id_evento AND ts.codice_gara = $1 WHERE e.codice_gara = $1',
       [codice_gara]
     );
     
@@ -4423,7 +3404,7 @@ app.get('/api/app/orari-teorici/:codice_gara/:numero_pilota', async (req, res) =
     // 2. Trova pilota con orario partenza
     const pilotaResult = await pool.query(
       'SELECT * FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
-      [evento.evento_id, numero_pilota]
+      [evento.id, numero_pilota]
     );
     
     if (pilotaResult.rows.length === 0) {
