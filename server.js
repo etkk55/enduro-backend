@@ -674,6 +674,41 @@ app.delete('/api/eventi/:id_evento/piloti', async (req, res) => {
   }
 });
 
+// NUOVO Chat 23: Recupera PIN pilota per SOS (solo per DdG)
+app.get('/api/eventi/:id_evento/pilota/:numero/pin', async (req, res) => {
+  try {
+    const { id_evento, numero } = req.params;
+    const result = await pool.query(
+      'SELECT numero_gara, cognome, nome, licenza_fmi, anno_nascita FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
+      [id_evento, numero]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pilota non trovato' });
+    }
+    
+    const pilota = result.rows[0];
+    const licenza = pilota.licenza_fmi || '';
+    const anno = String(pilota.anno_nascita || '');
+    
+    if (!licenza || !anno) {
+      return res.status(400).json({ error: 'Dati licenza o anno mancanti per questo pilota' });
+    }
+    
+    // PIN = ultime 4 cifre licenza + ultime 2 cifre anno
+    const pin = licenza.slice(-4) + anno.slice(-2);
+    
+    res.json({
+      numero: pilota.numero_gara,
+      cognome: pilota.cognome,
+      nome: pilota.nome,
+      pin: pin
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // NUOVO Chat 21: Import piloti da FICR startlist (crea piloti + orari)
 app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
   try {
