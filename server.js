@@ -3731,6 +3731,27 @@ app.put('/api/messaggi-piloti/:codice_gara/letti-tutti', async (req, res) => {
   }
 });
 
+// NUOVO Chat 23: ELIMINA MESSAGGIO PILOTA
+app.delete('/api/messaggi-piloti/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      'DELETE FROM messaggi_piloti WHERE id = $1 RETURNING *',
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Messaggio non trovato' });
+    }
+    
+    res.json({ success: true, message: 'Messaggio eliminato' });
+  } catch (err) {
+    console.error('[DELETE /api/messaggi-piloti] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore eliminazione' });
+  }
+});
+
 // ============================================
 // FINE API BIDIREZIONALE
 // ============================================
