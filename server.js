@@ -2934,7 +2934,7 @@ app.post('/api/app/login', async (req, res) => {
     // NUOVO Chat 24: Verifica PIN obbligatorio
     if (pin) {
       const licenza = pilota.licenza_fmi || '';
-      const anno = pilota.anno_nascita || '';
+      const anno = String(pilota.anno_nascita || '');
       
       if (!licenza || !anno) {
         return res.status(400).json({ 
