@@ -205,6 +205,14 @@ pool.query('SELECT NOW()', (err, res) => {
     }).then(() => {
       console.log('Colonne licenza_fmi e anno_nascita aggiunte a piloti');
       
+      // NUOVO Chat 24: Colonna telefono per emergenze
+      return pool.query(`
+        ALTER TABLE piloti 
+        ADD COLUMN IF NOT EXISTS telefono VARCHAR(20);
+      `);
+    }).then(() => {
+      console.log('Colonna telefono aggiunta a piloti');
+      
       // NUOVO Chat 21: Colonna codice_fmi per transcodifica FMI→FICR
       return pool.query(`
         ALTER TABLE eventi 
@@ -2855,7 +2863,7 @@ app.get('/api/eventi/:id/simulate-status', async (req, res) => {
 // 1. LOGIN APP - Validazione codice_accesso + numero pilota
 app.post('/api/app/login', async (req, res) => {
   try {
-    const { codice_accesso, numero_pilota } = req.body;
+    const { codice_accesso, numero_pilota, pin, telefono } = req.body;
     
     if (!codice_accesso || numero_pilota === undefined || numero_pilota === null) {
       return res.status(400).json({ 
@@ -2923,6 +2931,36 @@ app.post('/api/app/login', async (req, res) => {
     
     const pilota = pilotaResult.rows[0];
     
+    // NUOVO Chat 24: Verifica PIN obbligatorio
+    if (pin) {
+      const licenza = pilota.licenza_fmi || '';
+      const anno = pilota.anno_nascita || '';
+      
+      if (!licenza || !anno) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Dati licenza o anno mancanti. Contatta la Direzione Gara.' 
+        });
+      }
+      
+      const pinCorretto = licenza.slice(-4) + anno.slice(-2);
+      
+      if (pin !== pinCorretto) {
+        return res.status(401).json({ 
+          success: false, 
+          error: 'PIN errato. Controlla licenza e anno di nascita.' 
+        });
+      }
+      
+      // NUOVO Chat 24: Salva telefono se fornito
+      if (telefono) {
+        await pool.query(
+          'UPDATE piloti SET telefono = $1 WHERE id = $2',
+          [telefono, pilota.id]
+        );
+      }
+    }
+    
     res.json({
       success: true,
       isDdG: false,
@@ -2933,7 +2971,8 @@ app.post('/api/app/login', async (req, res) => {
         cognome: pilota.cognome,
         classe: pilota.classe,
         moto: pilota.moto,
-        team: pilota.team
+        team: pilota.team,
+        telefono: telefono || pilota.telefono || null
       },
       evento: {
         id: evento.id,
@@ -3559,7 +3598,7 @@ app.get('/api/app/pubblico/servizio/:codice_fmi', async (req, res) => {
 // 1. SOS/EMERGENZA - Pilota invia emergenza
 app.post('/api/app/sos', async (req, res) => {
   try {
-    const { codice_accesso, numero_pilota, testo, gps_lat, gps_lon } = req.body;
+    const { codice_accesso, numero_pilota, testo, tipo_emergenza, telefono, gps_lat, gps_lon } = req.body;
     
     if (!codice_accesso || !numero_pilota) {
       return res.status(400).json({ success: false, error: 'Dati mancanti' });
@@ -3577,15 +3616,21 @@ app.post('/api/app/sos', async (req, res) => {
     
     const codice_gara = eventoResult.rows[0].codice_gara;
     
+    // Componi testo con telefono se disponibile
+    let testoCompleto = testo || 'EMERGENZA SOS';
+    if (telefono) {
+      testoCompleto += ` | Tel: ${telefono}`;
+    }
+    
     // Inserisci emergenza
     const result = await pool.query(
       `INSERT INTO messaggi_piloti (codice_gara, numero_pilota, tipo, testo, gps_lat, gps_lon)
        VALUES ($1, $2, 'sos', $3, $4, $5)
        RETURNING *`,
-      [codice_gara, parseInt(numero_pilota), testo || 'EMERGENZA SOS', gps_lat || null, gps_lon || null]
+      [codice_gara, parseInt(numero_pilota), testoCompleto, gps_lat || null, gps_lon || null]
     );
     
-    console.log(`🆘 SOS RICEVUTO: Pilota #${numero_pilota} - Gara ${codice_gara}`);
+    console.log(`🆘 SOS RICEVUTO: Pilota #${numero_pilota} - Gara ${codice_gara} - Tipo: ${tipo_emergenza || 'sos'}`);
     
     res.json({ 
       success: true, 
@@ -3749,6 +3794,32 @@ app.delete('/api/messaggi-piloti/:id', async (req, res) => {
   } catch (err) {
     console.error('[DELETE /api/messaggi-piloti] Error:', err.message);
     res.status(500).json({ success: false, error: 'Errore eliminazione' });
+  }
+});
+
+// NUOVO Chat 24: AGGIORNA TESTO MESSAGGIO PILOTA (per dettagli SOS)
+app.put('/api/messaggi-piloti/:id/testo', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { testo } = req.body;
+    
+    if (!testo) {
+      return res.status(400).json({ success: false, error: 'Testo mancante' });
+    }
+    
+    const result = await pool.query(
+      'UPDATE messaggi_piloti SET testo = $1 WHERE id = $2 RETURNING *',
+      [testo, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Messaggio non trovato' });
+    }
+    
+    res.json({ success: true, messaggio: result.rows[0] });
+  } catch (err) {
+    console.error('[PUT /api/messaggi-piloti/testo] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore aggiornamento' });
   }
 });
 
