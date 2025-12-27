@@ -8,6 +8,14 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const FICR_BASE_URL = process.env.FICR_URL || 'https://apienduro.ficr.it';
 
+// NUOVO Chat 24: Configurazione Twilio (da variabili ambiente Railway)
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_VERIFY_SID = process.env.TWILIO_VERIFY_SID;
+
+// Flag per abilitare/disabilitare autenticazione PIN (true = PIN attivo come fallback)
+const PIN_AUTH_ENABLED = process.env.PIN_AUTH_ENABLED !== 'false'; // default true
+
 // CORS - Allow all origins
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -238,6 +246,24 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Campo codice_accesso_pubblico aggiunto a eventi');
+      
+      // NUOVO Chat 24: Tabella piloti verificati via Twilio
+      return pool.query(`
+        CREATE TABLE IF NOT EXISTS piloti_verificati (
+          id SERIAL PRIMARY KEY,
+          licenza_fmi VARCHAR(20) UNIQUE NOT NULL,
+          telefono VARCHAR(20) NOT NULL,
+          telefono_verificato BOOLEAN DEFAULT FALSE,
+          nome VARCHAR(100),
+          cognome VARCHAR(100),
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_piloti_verificati_licenza ON piloti_verificati(licenza_fmi);
+        CREATE INDEX IF NOT EXISTS idx_piloti_verificati_telefono ON piloti_verificati(telefono);
+      `);
+    }).then(() => {
+      console.log('Tabella piloti_verificati creata');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -2875,6 +2901,179 @@ app.get('/api/eventi/:id/simulate-status', async (req, res) => {
 // ============================================
 
 // ============================================
+// NUOVO Chat 24: API TWILIO - REGISTRAZIONE PILOTI
+// ============================================
+
+// 1. INVIA CODICE OTP via SMS
+app.post('/api/twilio/invia-otp', async (req, res) => {
+  try {
+    const { licenza_fmi, telefono, nome, cognome } = req.body;
+    
+    if (!licenza_fmi || !telefono) {
+      return res.status(400).json({ success: false, error: 'Licenza FMI e telefono richiesti' });
+    }
+    
+    // Verifica che Twilio sia configurato
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SID) {
+      return res.status(500).json({ success: false, error: 'Servizio SMS non configurato. Contatta l\'amministratore.' });
+    }
+    
+    // Normalizza telefono (aggiungi +39 se manca)
+    let telefonoNorm = telefono.replace(/\s/g, '');
+    if (!telefonoNorm.startsWith('+')) {
+      telefonoNorm = '+39' + telefonoNorm.replace(/^0/, '');
+    }
+    
+    // Salva/aggiorna pilota in attesa di verifica
+    await pool.query(`
+      INSERT INTO piloti_verificati (licenza_fmi, telefono, nome, cognome, telefono_verificato, updated_at)
+      VALUES ($1, $2, $3, $4, FALSE, NOW())
+      ON CONFLICT (licenza_fmi) 
+      DO UPDATE SET telefono = $2, nome = $3, cognome = $4, telefono_verificato = FALSE, updated_at = NOW()
+    `, [licenza_fmi.toUpperCase(), telefonoNorm, nome || null, cognome || null]);
+    
+    // Invia OTP tramite Twilio Verify
+    const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SID}/Verifications`;
+    
+    const response = await axios.post(twilioUrl, 
+      new URLSearchParams({
+        To: telefonoNorm,
+        Channel: 'sms'
+      }),
+      {
+        auth: {
+          username: TWILIO_ACCOUNT_SID,
+          password: TWILIO_AUTH_TOKEN
+        }
+      }
+    );
+    
+    console.log(`📱 OTP inviato a ${telefonoNorm} per licenza ${licenza_fmi}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Codice inviato via SMS',
+      telefono_mascherato: telefonoNorm.slice(0, 6) + '****' + telefonoNorm.slice(-2)
+    });
+    
+  } catch (err) {
+    console.error('[POST /api/twilio/invia-otp] Error:', err.response?.data || err.message);
+    
+    // Gestisci errori specifici Twilio
+    if (err.response?.data?.code === 60203) {
+      return res.status(429).json({ success: false, error: 'Troppi tentativi. Riprova tra qualche minuto.' });
+    }
+    if (err.response?.data?.code === 60200) {
+      return res.status(400).json({ success: false, error: 'Numero di telefono non valido' });
+    }
+    
+    res.status(500).json({ success: false, error: 'Errore invio SMS. Riprova.' });
+  }
+});
+
+// 2. VERIFICA CODICE OTP
+app.post('/api/twilio/verifica-otp', async (req, res) => {
+  try {
+    const { licenza_fmi, codice } = req.body;
+    
+    if (!licenza_fmi || !codice) {
+      return res.status(400).json({ success: false, error: 'Licenza FMI e codice richiesti' });
+    }
+    
+    // Verifica che Twilio sia configurato
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SID) {
+      return res.status(500).json({ success: false, error: 'Servizio SMS non configurato' });
+    }
+    
+    // Trova pilota
+    const pilotaResult = await pool.query(
+      'SELECT * FROM piloti_verificati WHERE licenza_fmi = $1',
+      [licenza_fmi.toUpperCase()]
+    );
+    
+    if (pilotaResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Richiedi prima l\'invio del codice' });
+    }
+    
+    const pilota = pilotaResult.rows[0];
+    
+    // Verifica OTP tramite Twilio
+    const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SID}/VerificationCheck`;
+    
+    const response = await axios.post(twilioUrl,
+      new URLSearchParams({
+        To: pilota.telefono,
+        Code: codice
+      }),
+      {
+        auth: {
+          username: TWILIO_ACCOUNT_SID,
+          password: TWILIO_AUTH_TOKEN
+        }
+      }
+    );
+    
+    if (response.data.status === 'approved') {
+      // Codice corretto - segna come verificato
+      await pool.query(
+        'UPDATE piloti_verificati SET telefono_verificato = TRUE, updated_at = NOW() WHERE licenza_fmi = $1',
+        [licenza_fmi.toUpperCase()]
+      );
+      
+      console.log(`✅ Pilota verificato: ${licenza_fmi}`);
+      
+      res.json({ success: true, message: 'Telefono verificato con successo!' });
+    } else {
+      res.status(400).json({ success: false, error: 'Codice non valido o scaduto' });
+    }
+    
+  } catch (err) {
+    console.error('[POST /api/twilio/verifica-otp] Error:', err.response?.data || err.message);
+    
+    if (err.response?.status === 404) {
+      return res.status(400).json({ success: false, error: 'Codice scaduto. Richiedi un nuovo codice.' });
+    }
+    
+    res.status(500).json({ success: false, error: 'Errore verifica. Riprova.' });
+  }
+});
+
+// 3. VERIFICA SE PILOTA È GIÀ REGISTRATO
+app.get('/api/twilio/stato/:licenza_fmi', async (req, res) => {
+  try {
+    const { licenza_fmi } = req.params;
+    
+    const result = await pool.query(
+      'SELECT licenza_fmi, telefono_verificato, telefono FROM piloti_verificati WHERE licenza_fmi = $1',
+      [licenza_fmi.toUpperCase()]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.json({ registrato: false, verificato: false });
+    }
+    
+    const pilota = result.rows[0];
+    res.json({ 
+      registrato: true, 
+      verificato: pilota.telefono_verificato,
+      telefono_mascherato: pilota.telefono ? pilota.telefono.slice(0, 6) + '****' + pilota.telefono.slice(-2) : null
+    });
+    
+  } catch (err) {
+    console.error('[GET /api/twilio/stato] Error:', err.message);
+    res.status(500).json({ error: 'Errore server' });
+  }
+});
+
+// 4. INFO CONFIGURAZIONE (per frontend)
+app.get('/api/auth/config', (req, res) => {
+  res.json({
+    pin_enabled: PIN_AUTH_ENABLED,
+    twilio_enabled: true
+  });
+});
+
+// ============================================
 // NUOVO Chat 19: API PER APP ERTA (Enduro Race Timing Assistant)
 // ============================================
 
@@ -2949,8 +3148,45 @@ app.post('/api/app/login', async (req, res) => {
     
     const pilota = pilotaResult.rows[0];
     
-    // NUOVO Chat 24: Verifica PIN obbligatorio
-    if (pin) {
+    // NUOVO Chat 24: Verifica se pilota è già verificato via Twilio
+    let isVerificatoTwilio = false;
+    if (pilota.licenza_fmi) {
+      const verificatoResult = await pool.query(
+        'SELECT telefono_verificato, telefono FROM piloti_verificati WHERE licenza_fmi = $1 AND telefono_verificato = TRUE',
+        [pilota.licenza_fmi.toUpperCase()]
+      );
+      isVerificatoTwilio = verificatoResult.rows.length > 0;
+      
+      // Se verificato, usa il telefono dalla tabella piloti_verificati
+      if (isVerificatoTwilio && verificatoResult.rows[0].telefono) {
+        pilota.telefono = verificatoResult.rows[0].telefono;
+      }
+    }
+    
+    // LOGICA AUTENTICAZIONE:
+    // 1. Se verificato Twilio → accesso diretto
+    // 2. Se non verificato e PIN fornito e PIN_AUTH_ENABLED → verifica PIN
+    // 3. Altrimenti → errore
+    
+    if (!isVerificatoTwilio) {
+      // Non verificato Twilio - serve PIN (se abilitato)
+      if (!PIN_AUTH_ENABLED) {
+        return res.status(401).json({ 
+          success: false, 
+          error: 'Registrati con SMS per accedere',
+          require_registration: true
+        });
+      }
+      
+      if (!pin) {
+        return res.status(401).json({ 
+          success: false, 
+          error: 'Inserisci il PIN oppure registrati con SMS',
+          pin_required: true
+        });
+      }
+      
+      // Verifica PIN
       const licenza = pilota.licenza_fmi || '';
       const anno = String(pilota.anno_nascita || '');
       
@@ -2970,7 +3206,7 @@ app.post('/api/app/login', async (req, res) => {
         });
       }
       
-      // NUOVO Chat 24: Salva telefono se fornito
+      // PIN corretto - salva telefono se fornito
       if (telefono) {
         await pool.query(
           'UPDATE piloti SET telefono = $1 WHERE id = $2',
@@ -2979,9 +3215,13 @@ app.post('/api/app/login', async (req, res) => {
       }
     }
     
+    // Autenticazione OK (Twilio o PIN)
+    console.log(`✅ Login: Pilota #${pilota.numero_gara} - ${isVerificatoTwilio ? 'TWILIO' : 'PIN'}`);
+    
     res.json({
       success: true,
       isDdG: false,
+      authMethod: isVerificatoTwilio ? 'twilio' : 'pin',
       pilota: {
         id: pilota.id,
         numero: pilota.numero_gara,
@@ -2990,7 +3230,8 @@ app.post('/api/app/login', async (req, res) => {
         classe: pilota.classe,
         moto: pilota.moto,
         team: pilota.team,
-        telefono: telefono || pilota.telefono || null
+        telefono: telefono || pilota.telefono || null,
+        licenza_fmi: pilota.licenza_fmi
       },
       evento: {
         id: evento.id,
