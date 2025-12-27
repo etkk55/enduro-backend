@@ -264,6 +264,22 @@ pool.query('SELECT NOW()', (err, res) => {
       `);
     }).then(() => {
       console.log('Tabella piloti_verificati creata');
+      
+      // NUOVO Chat 24: Tabella DdG verificati via Twilio
+      return pool.query(`
+        CREATE TABLE IF NOT EXISTS ddg_verificati (
+          id SERIAL PRIMARY KEY,
+          codice_ddg VARCHAR(20) UNIQUE NOT NULL,
+          telefono VARCHAR(20) NOT NULL,
+          telefono_verificato BOOLEAN DEFAULT FALSE,
+          nome VARCHAR(100),
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_ddg_verificati_codice ON ddg_verificati(codice_ddg);
+      `);
+    }).then(() => {
+      console.log('Tabella ddg_verificati creata');
     }).catch(err => {
       console.error('Errore migrazione:', err);
     });
@@ -3074,6 +3090,170 @@ app.get('/api/auth/config', (req, res) => {
 });
 
 // ============================================
+// NUOVO Chat 24: API TWILIO - REGISTRAZIONE DdG
+// ============================================
+
+// 5. INVIA CODICE OTP per DdG
+app.post('/api/twilio/ddg/invia-otp', async (req, res) => {
+  try {
+    const { codice_ddg, telefono, nome } = req.body;
+    
+    if (!codice_ddg || !telefono) {
+      return res.status(400).json({ success: false, error: 'Codice DdG e telefono richiesti' });
+    }
+    
+    // Verifica che Twilio sia configurato
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SID) {
+      return res.status(500).json({ success: false, error: 'Servizio SMS non configurato. Contatta l\'amministratore.' });
+    }
+    
+    // Normalizza telefono (aggiungi +39 se manca)
+    let telefonoNorm = telefono.replace(/\s/g, '');
+    if (!telefonoNorm.startsWith('+')) {
+      telefonoNorm = '+39' + telefonoNorm.replace(/^0/, '');
+    }
+    
+    // Salva/aggiorna DdG in attesa di verifica
+    await pool.query(`
+      INSERT INTO ddg_verificati (codice_ddg, telefono, nome, telefono_verificato, updated_at)
+      VALUES ($1, $2, $3, FALSE, NOW())
+      ON CONFLICT (codice_ddg) 
+      DO UPDATE SET telefono = $2, nome = $3, telefono_verificato = FALSE, updated_at = NOW()
+    `, [codice_ddg.toUpperCase(), telefonoNorm, nome || null]);
+    
+    // Invia OTP tramite Twilio Verify
+    const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SID}/Verifications`;
+    
+    const response = await axios.post(twilioUrl, 
+      new URLSearchParams({
+        To: telefonoNorm,
+        Channel: 'sms'
+      }),
+      {
+        auth: {
+          username: TWILIO_ACCOUNT_SID,
+          password: TWILIO_AUTH_TOKEN
+        }
+      }
+    );
+    
+    console.log(`📱 OTP DdG inviato a ${telefonoNorm} per codice ${codice_ddg}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Codice inviato via SMS',
+      telefono_mascherato: telefonoNorm.slice(0, 6) + '****' + telefonoNorm.slice(-2)
+    });
+    
+  } catch (err) {
+    console.error('[POST /api/twilio/ddg/invia-otp] Error:', err.response?.data || err.message);
+    
+    if (err.response?.data?.code === 60203) {
+      return res.status(429).json({ success: false, error: 'Troppi tentativi. Riprova tra qualche minuto.' });
+    }
+    if (err.response?.data?.code === 60200) {
+      return res.status(400).json({ success: false, error: 'Numero di telefono non valido' });
+    }
+    
+    res.status(500).json({ success: false, error: 'Errore invio SMS. Riprova.' });
+  }
+});
+
+// 6. VERIFICA CODICE OTP per DdG
+app.post('/api/twilio/ddg/verifica-otp', async (req, res) => {
+  try {
+    const { codice_ddg, codice } = req.body;
+    
+    if (!codice_ddg || !codice) {
+      return res.status(400).json({ success: false, error: 'Codice DdG e codice OTP richiesti' });
+    }
+    
+    // Verifica che Twilio sia configurato
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SID) {
+      return res.status(500).json({ success: false, error: 'Servizio SMS non configurato' });
+    }
+    
+    // Trova DdG
+    const ddgResult = await pool.query(
+      'SELECT * FROM ddg_verificati WHERE codice_ddg = $1',
+      [codice_ddg.toUpperCase()]
+    );
+    
+    if (ddgResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Richiedi prima l\'invio del codice' });
+    }
+    
+    const ddg = ddgResult.rows[0];
+    
+    // Verifica OTP tramite Twilio
+    const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SID}/VerificationCheck`;
+    
+    const response = await axios.post(twilioUrl,
+      new URLSearchParams({
+        To: ddg.telefono,
+        Code: codice
+      }),
+      {
+        auth: {
+          username: TWILIO_ACCOUNT_SID,
+          password: TWILIO_AUTH_TOKEN
+        }
+      }
+    );
+    
+    if (response.data.status === 'approved') {
+      // Codice corretto - segna come verificato
+      await pool.query(
+        'UPDATE ddg_verificati SET telefono_verificato = TRUE, updated_at = NOW() WHERE codice_ddg = $1',
+        [codice_ddg.toUpperCase()]
+      );
+      
+      console.log(`✅ DdG verificato: ${codice_ddg}`);
+      
+      res.json({ success: true, message: 'DdG verificato con successo!' });
+    } else {
+      res.status(400).json({ success: false, error: 'Codice non valido o scaduto' });
+    }
+    
+  } catch (err) {
+    console.error('[POST /api/twilio/ddg/verifica-otp] Error:', err.response?.data || err.message);
+    
+    if (err.response?.status === 404) {
+      return res.status(400).json({ success: false, error: 'Codice scaduto. Richiedi un nuovo codice.' });
+    }
+    
+    res.status(500).json({ success: false, error: 'Errore verifica. Riprova.' });
+  }
+});
+
+// 7. VERIFICA SE DdG È GIÀ REGISTRATO
+app.get('/api/twilio/ddg/stato/:codice_ddg', async (req, res) => {
+  try {
+    const { codice_ddg } = req.params;
+    
+    const result = await pool.query(
+      'SELECT codice_ddg, telefono_verificato, telefono FROM ddg_verificati WHERE codice_ddg = $1',
+      [codice_ddg.toUpperCase()]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.json({ registrato: false, verificato: false });
+    }
+    
+    const ddg = result.rows[0];
+    res.json({ 
+      registrato: true, 
+      verificato: ddg.telefono_verificato,
+      telefono_mascherato: ddg.telefono ? ddg.telefono.slice(0, 6) + '****' + ddg.telefono.slice(-2) : null
+    });
+    
+  } catch (err) {
+    console.error('[GET /api/twilio/ddg/stato] Error:', err.message);
+    res.status(500).json({ error: 'Errore server' });
+  }
+});
+
+// ============================================
 // NUOVO Chat 19: API PER APP ERTA (Enduro Race Timing Assistant)
 // ============================================
 
@@ -3109,9 +3289,31 @@ app.post('/api/app/login', async (req, res) => {
     const inputPulito = String(numero_pilota).trim().toUpperCase();
     
     if (inputPulito === codiceDdG.toUpperCase() || inputPulito === '0') {
+      // NUOVO Chat 24: Verifica se DdG è registrato via Twilio
+      const ddgVerificatoResult = await pool.query(
+        'SELECT telefono_verificato, telefono FROM ddg_verificati WHERE codice_ddg = $1 AND telefono_verificato = TRUE',
+        [inputPulito]
+      );
+      
+      const isDdGVerificato = ddgVerificatoResult.rows.length > 0;
+      
+      // Se Twilio è configurato e DdG non verificato, blocca accesso
+      if (TWILIO_ACCOUNT_SID && TWILIO_VERIFY_SID && !isDdGVerificato) {
+        return res.status(401).json({
+          success: false,
+          isDdG: true,
+          error: 'Registra il DdG con SMS per accedere',
+          require_registration: true,
+          ddg_code: inputPulito
+        });
+      }
+      
+      console.log(`✅ Login DdG: ${inputPulito} - ${isDdGVerificato ? 'TWILIO' : 'NO_TWILIO'}`);
+      
       return res.json({
         success: true,
         isDdG: true,
+        authMethod: isDdGVerificato ? 'twilio' : 'none',
         pilota: {
           id: null,
           numero: inputPulito,
