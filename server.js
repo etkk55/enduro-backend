@@ -438,6 +438,24 @@ app.post('/api/app/posizione', async (req, res) => {
   }
 });
 
+// NUOVO Chat 24: Elimina posizioni GPS pilota (per ritirati)
+app.delete('/api/gps/:codice_gara/:numero_pilota', async (req, res) => {
+  try {
+    const { codice_gara, numero_pilota } = req.params;
+    
+    await pool.query(
+      'DELETE FROM posizioni_piloti WHERE codice_gara = $1 AND numero_pilota = $2',
+      [codice_gara, parseInt(numero_pilota)]
+    );
+    
+    console.log(`🗑 GPS eliminato: Pilota #${numero_pilota} - Gara ${codice_gara}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[DELETE /api/gps] Error:', err.message);
+    res.status(500).json({ success: false, error: 'Errore eliminazione' });
+  }
+});
+
 // NUOVO Chat 21: Ottieni ultima posizione di tutti i piloti
 app.get('/api/eventi/:id/posizioni-piloti', async (req, res) => {
   try {
