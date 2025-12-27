@@ -732,7 +732,8 @@ app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
       const moto = pilota.Moto || '';
       const team = pilota.Scuderia || pilota.MotoClub || '';
       const orarioPartenza = pilota.Orario || null;
-      
+const licenza = pilota.co_Licenza || null;
+      const annoNascita = pilota.co_AnnoConduttore || null;
       // Verifica se pilota esiste già
       const existingRes = await pool.query(
         'SELECT id FROM piloti WHERE id_evento = $1 AND numero_gara = $2',
@@ -743,16 +744,16 @@ app.post('/api/eventi/:id_evento/import-piloti-ficr', async (req, res) => {
         // Aggiorna pilota esistente
         await pool.query(`
           UPDATE piloti SET 
-            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6
-          WHERE id_evento = $7 AND numero_gara = $8
-        `, [cognome, nome, classe, moto, team, orarioPartenza, id_evento, numeroGara]);
+            cognome = $1, nome = $2, classe = $3, moto = $4, team = $5, orario_partenza = $6, licenza_fmi = $7, anno_nascita = $8
+          WHERE id_evento = $9 AND numero_gara = $10
+        `, [cognome, nome, classe, moto, team, orarioPartenza, licenza, annoNascita, id_evento, numeroGara]);
         updated++;
       } else {
         // Crea nuovo pilota
         await pool.query(`
-          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza]);
+          INSERT INTO piloti (id_evento, numero_gara, cognome, nome, classe, moto, team, orario_partenza, licenza_fmi, anno_nascita)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `, [id_evento, numeroGara, cognome, nome, classe, moto, team, orarioPartenza, licenza, annoNascita]);
         created++;
       }
     }
